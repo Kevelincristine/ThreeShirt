@@ -1,10 +1,8 @@
-from django.contrib import admin
+
 from django.urls import include, path
+from accounts.admin import three_shirt_admin
 
 urlpatterns = [
-    # Área administrativa do Django.
-    path('admin/', admin.site.urls),
-
-    # Endpoints relacionados às contas do ThreeShirt.
-    path('api/accounts/', include('accounts.urls')),
+    path("admin/", three_shirt_admin.urls),
+    path("api/accounts/", include("accounts.urls")),
 ]
