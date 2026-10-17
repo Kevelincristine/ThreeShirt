@@ -16,3 +16,5 @@ venv/
 # Local databases
 db.sqlite3
 **/db.sqlite3
+db-backup-*.sqlite3
+private_media/

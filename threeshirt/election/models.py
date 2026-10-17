@@ -5,6 +5,9 @@ from django.core.validators import MinValueValidator, MaxValueValidator
 from django.db import models
 from django.db.models import Q
 
+from .storage import PrivateProposalStorage
+from .validators import validate_proposal_image
+
 
 COLORS = [
     ("RED", "Vermelho"),
@@ -126,7 +129,11 @@ class ShirtProposal(models.Model):
 
     title = models.CharField(max_length=100)
     description = models.TextField(max_length=1000)
-    image = models.ImageField(upload_to="shirt_proposals/")
+    image = models.ImageField(
+        upload_to="shirt_proposals/",
+        storage=PrivateProposalStorage(),
+        validators=[validate_proposal_image],
+    )
 
     base_color = models.CharField(
         max_length=5,
@@ -162,14 +169,41 @@ class ShirtProposal(models.Model):
     def clean(self):
         super().clean()
 
-        if self.has_phrase and not self.phrase_text.strip():
+        if not isinstance(self.title, str) or not self.title.strip():
+            raise ValidationError({
+                "title": "O título não pode ficar vazio."
+            })
+
+        if (
+            not isinstance(self.description, str)
+            or not self.description.strip()
+        ):
+            raise ValidationError({
+                "description": "A descrição não pode ficar vazia."
+            })
+
+        if len(self.description) > 1000:
+            raise ValidationError({
+                "description": (
+                    "A descrição deve ter no máximo 1000 caracteres."
+                )
+            })
+
+        if self.has_phrase and (
+            not isinstance(self.phrase_text, str)
+            or not self.phrase_text.strip()
+        ):
             raise ValidationError({
                 "phrase_text": (
                     "Informe a frase quando a proposta tiver uma."
                 )
             })
 
-        if not self.has_phrase and self.phrase_text.strip():
+        if (
+            not self.has_phrase
+            and isinstance(self.phrase_text, str)
+            and self.phrase_text.strip()
+        ):
             raise ValidationError({
                 "phrase_text": (
                     "Deixe a frase vazia quando a proposta não tiver frase."
@@ -220,6 +254,11 @@ class ElectionSettings(models.Model):
 
     survey_open = models.BooleanField(default=False)
     voting_open = models.BooleanField(default=False)
+    # Controls authorization to disclose calculated results, not calculation.
+    results_release_authorized = models.BooleanField(
+        "autorizar divulgação dos resultados",
+        default=False,
+    )
 
     survey_closed_at = models.DateTimeField(null=True, blank=True)
     voting_started_at = models.DateTimeField(null=True, blank=True)
