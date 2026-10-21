@@ -64,6 +64,21 @@ flowchart TD
 
 ## Regras e decisões técnicas
 
+### Solicitação de códigos de login
+
+As solicitações são limitadas a três por conta e dez por origem em qualquer
+janela móvel de 60 segundos. Os identificadores de conta e origem são
+armazenados como HMAC, e os contadores são persistidos no banco para
+sincronização entre processos. A origem usa `REMOTE_ADDR`, fornecido pelo
+servidor WSGI; cabeçalhos como `X-Forwarded-For` não são considerados. Em uma
+implantação atrás de proxy, o proxy e o servidor WSGI precisam estar
+configurados para fornecer o endereço real do cliente de forma confiável.
+Um novo código é persistido inicialmente como inativo e só é ativado, junto
+com a invalidação dos anteriores, após a confirmação do envio. Se a ativação
+falhar depois do envio, o novo código permanece inativo e o anterior continua
+válido. Uma exceção do transporte não permite saber se o provedor aceitou o
+e-mail; nesse caso nenhum código novo é ativado e o código anterior é mantido.
+
 ### Votação e apuração
 
 - Cada estudante pode registrar no máximo um voto. `Vote.student` é uma

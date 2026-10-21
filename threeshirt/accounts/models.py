@@ -47,3 +47,14 @@ class EmailLoginCode(models.Model):
 
     def __str__(self):
         return f"Código de acesso para {self.email}"
+
+
+class LoginRequestRateBucket(models.Model):
+    """Stores a rolling request window for a pseudonymous rate-limit key."""
+
+    key_digest = models.CharField(max_length=64, unique=True)
+    request_timestamps = models.JSONField(default=list)
+    updated_at = models.DateTimeField(auto_now=True, db_index=True)
+
+    def __str__(self):
+        return "Limite de solicitações de login"
