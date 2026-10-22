@@ -1,4 +1,5 @@
 
+from datetime import timedelta
 from io import BytesIO
 from importlib import import_module
 from pathlib import Path
@@ -495,6 +496,24 @@ class VoteConcurrencyTests(TransactionTestCase):
         self.assertFalse(settings.voting_open)
         self.assertIsNotNone(settings.voting_ended_at)
 
+        proposal = ShirtProposal.objects.get(pk=self.proposal.pk)
+        original_title = proposal.title
+        proposal.title = "Alteração após corrida de voto e fechamento"
+        request = RequestFactory().post("/admin/election/shirtproposal/")
+        request.user = User.objects.get(pk=self.admin_user.pk)
+        with self.assertRaises(ValidationError):
+            ShirtProposalAdmin(
+                ShirtProposal,
+                three_shirt_admin,
+            ).save_model(
+                request,
+                proposal,
+                form=None,
+                change=True,
+            )
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.title, original_title)
+
 
 class ElectionSettingsTests(TestCase):
     def test_survey_and_voting_cannot_be_open_together(self):
@@ -620,6 +639,86 @@ class ElectionSettingsAdminTests(TestCase):
         settings.refresh_from_db()
         self.assertFalse(settings.voting_open)
         self.assertIsNotNone(settings.voting_ended_at)
+
+    def test_admin_can_reopen_voting_when_no_votes_exist(self):
+        settings = ElectionSettings.objects.create(
+            voting_open=False,
+            voting_started_at=timezone.now() - timedelta(days=2),
+            voting_ended_at=timezone.now() - timedelta(days=1),
+        )
+        request = self.make_request(self.authorized_admin)
+        form_class = self.model_admin.get_form(request)
+        form = form_class(data={
+            "survey_open": False,
+            "voting_open": True,
+            "results_release_authorized": False,
+        }, instance=settings)
+
+        self.assertTrue(form.is_valid(), form.errors)
+        settings = form.save(commit=False)
+        self.model_admin.save_model(request, settings, form, change=True)
+
+        settings.refresh_from_db()
+        self.assertTrue(settings.voting_open)
+        self.assertIsNotNone(settings.voting_started_at)
+        self.assertIsNone(settings.voting_ended_at)
+
+    def test_reopening_is_revalidated_after_stale_form_and_preserves_timestamps(self):
+        previous_start = timezone.now() - timedelta(days=2)
+        previous_end = timezone.now() - timedelta(days=1)
+        settings = ElectionSettings.objects.create(
+            voting_open=False,
+            voting_started_at=previous_start,
+            voting_ended_at=previous_end,
+        )
+        request = self.make_request(self.authorized_admin)
+        form_class = self.model_admin.get_form(request)
+        form = form_class(data={
+            "survey_open": False,
+            "voting_open": True,
+            "results_release_authorized": False,
+        }, instance=settings)
+        self.assertTrue(form.is_valid(), form.errors)
+        settings = form.save(commit=False)
+
+        author = User.objects.create_user(username="reopen_vote_author")
+        proposal = ShirtProposal.objects.create(
+            author=author,
+            title="Proposta votada",
+            description="Proposta aprovada para voto",
+            image="shirt_proposals/reopen-vote.png",
+            base_color="BLACK",
+            related_to_course=True,
+            additional_colors=["BLUE"],
+            has_collar=True,
+            has_phrase=False,
+            phrase_text="",
+            status=ShirtProposal.Status.APPROVED,
+        )
+        Vote.objects.create(student=self.student, proposal=proposal)
+
+        with self.assertRaises(ValidationError):
+            self.model_admin.save_model(
+                request,
+                settings,
+                form=form,
+                change=True,
+            )
+
+        self.assertEqual(settings.voting_started_at, previous_start)
+        self.assertEqual(settings.voting_ended_at, previous_end)
+        settings.refresh_from_db()
+        self.assertFalse(settings.voting_open)
+        self.assertEqual(settings.voting_started_at, previous_start)
+        self.assertEqual(settings.voting_ended_at, previous_end)
+
+        fresh_form = form_class(data={
+            "survey_open": False,
+            "voting_open": True,
+            "results_release_authorized": False,
+        }, instance=settings)
+        self.assertFalse(fresh_form.is_valid())
+        self.assertIn("voting_open", fresh_form.errors)
 
     def test_admin_controls_results_release_without_changing_voting_state(self):
         settings = ElectionSettings.objects.create(
@@ -1924,6 +2023,103 @@ class ShirtProposalAdminTests(TestCase):
         )
         self.proposal.refresh_from_db()
         self.assertEqual(self.proposal.status, ShirtProposal.Status.REJECTED)
+
+    def test_proposal_without_votes_can_be_edited_after_voting_closes(self):
+        ElectionSettings.objects.create(voting_open=False)
+        request = self.request_for(self.authorized_admin)
+        self.proposal.title = "Título revisado"
+        self.proposal.status = ShirtProposal.Status.APPROVED
+
+        self.assertTrue(
+            self.model_admin.has_change_permission(request, self.proposal)
+        )
+        self.model_admin.save_model(
+            request,
+            self.proposal,
+            form=None,
+            change=True,
+        )
+
+        self.proposal.refresh_from_db()
+        self.assertEqual(self.proposal.title, "Título revisado")
+        self.assertEqual(self.proposal.status, ShirtProposal.Status.APPROVED)
+
+    def test_proposal_cannot_be_edited_or_moderated_while_voting_is_open(self):
+        ElectionSettings.objects.create(
+            voting_open=True,
+            voting_started_at=timezone.now(),
+        )
+        request = self.request_for(self.authorized_admin)
+        original_title = self.proposal.title
+        self.proposal.title = "Título alterado durante a votação"
+        self.proposal.status = ShirtProposal.Status.APPROVED
+
+        self.assertFalse(
+            self.model_admin.has_change_permission(request, self.proposal)
+        )
+        with self.assertRaises(ValidationError):
+            self.model_admin.save_model(
+                request,
+                self.proposal,
+                form=None,
+                change=True,
+            )
+
+        self.proposal.refresh_from_db()
+        self.assertEqual(self.proposal.title, original_title)
+        self.assertEqual(self.proposal.status, ShirtProposal.Status.PENDING)
+
+    def test_stale_proposal_edit_is_rejected_if_voting_opens_before_save(self):
+        ElectionSettings.objects.create(voting_open=False)
+        stale_proposal = ShirtProposal.objects.get(pk=self.proposal.pk)
+        stale_proposal.title = "Edição de formulário antigo"
+        ElectionSettings.objects.filter(pk=1).update(
+            voting_open=True,
+            voting_started_at=timezone.now(),
+        )
+        request = self.request_for(self.authorized_admin)
+
+        with self.assertRaises(ValidationError):
+            self.model_admin.save_model(
+                request,
+                stale_proposal,
+                form=None,
+                change=True,
+            )
+
+        self.proposal.refresh_from_db()
+        self.assertNotEqual(self.proposal.title, "Edição de formulário antigo")
+
+    def test_proposal_with_votes_cannot_change_content_or_status_after_close(self):
+        ElectionSettings.objects.create(voting_open=False)
+        request = self.request_for(self.authorized_admin)
+        self.proposal.status = ShirtProposal.Status.APPROVED
+        self.model_admin.save_model(
+            request,
+            self.proposal,
+            form=None,
+            change=True,
+        )
+        Vote.objects.create(student=self.student, proposal=self.proposal)
+        original_title = self.proposal.title
+
+        self.proposal.title = "Título alterado depois do voto"
+        self.proposal.status = ShirtProposal.Status.REJECTED
+        self.assertFalse(
+            self.model_admin.has_change_permission(request, self.proposal)
+        )
+        with self.assertRaises(ValidationError):
+            self.model_admin.save_model(
+                request,
+                self.proposal,
+                form=None,
+                change=True,
+            )
+
+        self.proposal.refresh_from_db()
+        self.assertEqual(self.proposal.title, original_title)
+        self.assertEqual(self.proposal.status, ShirtProposal.Status.APPROVED)
+        self.assertEqual(Vote.objects.filter(proposal=self.proposal).count(), 1)
 
     def test_unauthorized_staff_and_student_cannot_moderate(self):
         for user in (self.unauthorized_admin, self.student):
