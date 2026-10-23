@@ -5,7 +5,9 @@ Django settings for backend project.
 
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
+from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
 
@@ -35,6 +37,49 @@ AUTHORIZED_LOGIN_EMAILS = [
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "")
 DEBUG = True
 ALLOWED_HOSTS = []
+
+_csrf_trusted_origins_setting = os.getenv(
+    "THREESHIRT_CSRF_TRUSTED_ORIGINS",
+    "",
+).strip()
+CSRF_TRUSTED_ORIGINS = []
+if _csrf_trusted_origins_setting:
+    _csrf_trusted_origins = [
+        origin.strip()
+        for origin in _csrf_trusted_origins_setting.split(",")
+    ]
+    if any(not origin for origin in _csrf_trusted_origins):
+        raise ImproperlyConfigured(
+            "THREESHIRT_CSRF_TRUSTED_ORIGINS must contain only valid origins."
+        )
+
+    for _origin in _csrf_trusted_origins:
+        try:
+            _parsed_origin = urlsplit(_origin)
+            _parsed_origin.port
+        except ValueError as exc:
+            raise ImproperlyConfigured(
+                "THREESHIRT_CSRF_TRUSTED_ORIGINS must contain only valid origins."
+            ) from exc
+
+        if (
+            _parsed_origin.scheme not in {"http", "https"}
+            or not _parsed_origin.hostname
+            or "*" in _parsed_origin.netloc
+            or _parsed_origin.username is not None
+            or _parsed_origin.password is not None
+            or _parsed_origin.path
+            or _parsed_origin.query
+            or _parsed_origin.fragment
+            or any(character.isspace() for character in _origin)
+            or _parsed_origin.netloc.endswith(":")
+            or _origin != f"{_parsed_origin.scheme}://{_parsed_origin.netloc}"
+        ):
+            raise ImproperlyConfigured(
+                "THREESHIRT_CSRF_TRUSTED_ORIGINS must contain only valid origins."
+            )
+
+    CSRF_TRUSTED_ORIGINS = _csrf_trusted_origins
 
 
 # Aplicações.

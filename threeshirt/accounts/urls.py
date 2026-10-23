@@ -4,6 +4,11 @@ from django.urls import path
 from . import views
 
 urlpatterns = [
+    path(
+        "csrf/",
+        views.initialize_csrf,
+        name="initialize_csrf",
+    ),
     # Solicita um código temporário por e-mail.
     path(
         "request-code/",

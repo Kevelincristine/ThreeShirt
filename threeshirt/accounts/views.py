@@ -17,8 +17,10 @@ from django.core.mail import send_mail
 from django.db import OperationalError, connection, transaction
 from django.db.models import F, Q
 from django.http import JsonResponse
+from django.middleware.csrf import get_token
 from django.utils import timezone
-from django.views.decorators.http import require_POST
+from django.views.decorators.csrf import ensure_csrf_cookie
+from django.views.decorators.http import require_GET, require_POST
 
 from .models import EmailLoginCode, LoginRequestRateBucket, UserProfile
 
@@ -28,6 +30,13 @@ LOGIN_REQUEST_ACCOUNT_LIMIT = 3
 LOGIN_REQUEST_SOURCE_LIMIT = 10
 SQLITE_RATE_LIMIT_RETRIES = 20
 logger = logging.getLogger(__name__)
+
+
+@require_GET
+@ensure_csrf_cookie
+def initialize_csrf(request):
+    """Provides a CSRF token to the frontend without changing authentication."""
+    return JsonResponse({"csrfToken": get_token(request)})
 
 
 def _run_with_sqlite_lock_retry(operation):

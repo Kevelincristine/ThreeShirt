@@ -11,6 +11,7 @@ from django.core import mail
 from django.db import OperationalError
 from django.db.models.query import QuerySet
 from django.test import (
+    Client,
     RequestFactory,
     TestCase,
     TransactionTestCase,
@@ -408,6 +409,100 @@ class LoginTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
+
+
+@override_settings(
+    AUTHORIZED_LOGIN_EMAILS=[TEST_EMAIL],
+    CSRF_TRUSTED_ORIGINS=["http://127.0.0.1:5173"],
+    EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
+    PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"],
+)
+class CsrfProtectionTests(TestCase):
+    def setUp(self):
+        self.client = Client(enforce_csrf_checks=True)
+        self.user = User.objects.create_user(
+            username="estudante_csrf",
+            email=TEST_EMAIL,
+        )
+
+    def get_csrf_token(self):
+        response = self.client.get("/api/accounts/csrf/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("csrftoken", response.cookies)
+        self.assertTrue(response.json()["csrfToken"])
+        return response.json()["csrfToken"]
+
+    def test_csrf_route_only_accepts_get_and_sets_cookie(self):
+        token = self.get_csrf_token()
+        response = self.client.post(
+            "/api/accounts/csrf/",
+            HTTP_X_CSRFTOKEN=token,
+        )
+        self.assertEqual(response.status_code, 405)
+
+    def test_authentication_posts_reject_missing_and_invalid_csrf(self):
+        endpoints = (
+            ("/api/accounts/request-code/", {"email": TEST_EMAIL}),
+            (
+                "/api/accounts/verify-code/",
+                {"email": TEST_EMAIL, "code": "123456"},
+            ),
+        )
+
+        for path, data in endpoints:
+            with self.subTest(path=path, token="missing"):
+                response = self.client.post(path, data)
+                self.assertEqual(response.status_code, 403)
+
+            with self.subTest(path=path, token="invalid"):
+                response = self.client.post(
+                    path,
+                    data,
+                    HTTP_X_CSRFTOKEN="invalid-token",
+                )
+                self.assertEqual(response.status_code, 403)
+
+    def test_authentication_posts_accept_csrf_token(self):
+        token = self.get_csrf_token()
+        request_response = self.client.post(
+            "/api/accounts/request-code/",
+            {"email": TEST_EMAIL},
+            HTTP_X_CSRFTOKEN=token,
+            HTTP_ORIGIN="http://127.0.0.1:5173",
+        )
+        self.assertEqual(request_response.status_code, 200)
+
+        login_code = EmailLoginCode.objects.create(
+            email=TEST_EMAIL,
+            code_hash=make_password("123456"),
+            expires_at=timezone.now() + timedelta(minutes=10),
+        )
+        verify_response = self.client.post(
+            "/api/accounts/verify-code/",
+            {"email": TEST_EMAIL, "code": "123456"},
+            HTTP_X_CSRFTOKEN=token,
+            HTTP_ORIGIN="http://127.0.0.1:5173",
+        )
+
+        self.assertEqual(verify_response.status_code, 200)
+        self.assertEqual(
+            verify_response.json()["message"],
+            "Login realizado com sucesso.",
+        )
+        self.assertTrue(self.client.session.get("_auth_user_id"))
+        login_code.refresh_from_db()
+        self.assertIsNotNone(login_code.used_at)
+
+    def test_authentication_posts_reject_untrusted_origin(self):
+        token = self.get_csrf_token()
+        response = self.client.post(
+            "/api/accounts/request-code/",
+            {"email": TEST_EMAIL},
+            HTTP_X_CSRFTOKEN=token,
+            HTTP_ORIGIN="https://untrusted.example",
+        )
+
+        self.assertEqual(response.status_code, 403)
 
 
 @override_settings(

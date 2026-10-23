@@ -11,8 +11,9 @@ moderação e a votação. A compatibilidade entre preferências e propostas
 complementa a apuração dos votos, sem substituir a escolha democrática.
 
 > **Estado atual:** regras de negócio do backend implementadas e cobertas por
-> testes automatizados. O projeto não possui frontend de estudante nem API
-> para consultar ou publicar resultados; ainda não é um serviço de produção.
+> testes automatizados. A Etapa 12.1 adiciona o login de estudante à estrutura
+> React do frontend. Ainda não há APIs de preferências, propostas, votação ou
+> resultados, e o projeto não é um serviço de produção.
 
 ## Conteúdo
 
@@ -22,6 +23,7 @@ complementa a apuração dos votos, sem substituir a escolha democrática.
 - [Arquitetura](#arquitetura)
 - [Tecnologias](#tecnologias)
 - [Executar localmente no Windows](#executar-localmente-no-windows)
+- [Frontend (Etapa 12.1)](#frontend-etapa-121)
 - [Testes e validação](#testes-e-validação)
 - [Estrutura do repositório](#estrutura-do-repositório)
 - [Processo de desenvolvimento](#processo-de-desenvolvimento)
@@ -148,6 +150,10 @@ restrinja a consulta dos resultados.
 - **Armazenamento privado**: `PrivateProposalStorage` mantém imagens fora de
   URLs públicas; a view protegida valida e entrega somente arquivos
   permitidos.
+- **Frontend**: `frontend/` contém a interface React, TypeScript e Vite, com
+  login de estudante por código. O proxy de desenvolvimento encaminha `/api`
+  e `/proposals` ao Django sem alterar os caminhos. Isso não substitui a
+  configuração de segurança necessária para outros ambientes.
 - **Testes**: `accounts/tests.py` e `election/tests.py` verificam regras de
   negócio, permissões, migrações de imagem e concorrência SQLite com conexões
   independentes.
@@ -166,6 +172,10 @@ Os testes desta revisão foram executados com Python 3.14.3 e SQLite 3.50.4.
 Essas versões descrevem o ambiente local, não uma matriz de compatibilidade
 para outros ambientes.
 
+O frontend usa React, TypeScript e Vite. As versões e dependências exatas
+ficam declaradas em `frontend/package.json` e travadas em
+`frontend/package-lock.json`; é necessário Node.js 20.19+ (ou 22.12+).
+
 ## Executar localmente no Windows
 
 Abra o PowerShell na raiz do repositório:
@@ -183,6 +193,7 @@ Crie `threeshirt\.env` localmente. Não compartilhe nem versione esse arquivo:
 DJANGO_SECRET_KEY=use-uma-chave-aleatoria-local
 THREESHIRT_ALLOWED_EMAILS=admin@exemplo.com
 THREESHIRT_ADMIN_EMAILS=admin@exemplo.com
+THREESHIRT_CSRF_TRUSTED_ORIGINS=http://127.0.0.1:5173
 ```
 
 Cadastre a conta administrativa inicial com um e-mail incluído nas duas
@@ -200,7 +211,48 @@ autorizados que correspondam a usuários já cadastrados. No ambiente local, o
 backend padrão de e-mail é o console: o código temporário é exibido na saída
 do servidor. O painel administrativo fica em `http://127.0.0.1:8000/admin/`;
 as rotas de autenticação são `POST /api/accounts/request-code/` e
-`POST /api/accounts/verify-code/`.
+`POST /api/accounts/verify-code/`. O frontend obtém um token CSRF por
+`GET /api/accounts/csrf/`; a origem informada em
+`THREESHIRT_CSRF_TRUSTED_ORIGINS` deve corresponder exatamente à origem do
+navegador.
+
+### Frontend (Etapa 12.1)
+
+Instale e execute o frontend em um segundo terminal, na raiz do repositório:
+
+```powershell
+npm --prefix .\frontend ci
+npm --prefix .\frontend run dev
+```
+
+Abra o endereço indicado pelo Vite (por padrão,
+`http://127.0.0.1:5173/`). O servidor de desenvolvimento encaminha, sem
+reescrever, `/api/*` e `/proposals/*` ao Django em
+`http://127.0.0.1:8000`. Execute o backend separadamente, na pasta
+`threeshirt`, com `python manage.py runserver 127.0.0.1:8000`.
+
+Verifique o frontend com:
+
+```powershell
+npm --prefix .\frontend run typecheck
+npm --prefix .\frontend run build
+```
+
+O login solicita um código e verifica-o por meio das views Django existentes.
+Antes de cada POST, o cliente busca um token CSRF em
+`/api/accounts/csrf/`, envia-o no cabeçalho `X-CSRFToken` e inclui cookies de
+sessão. O proxy de desenvolvimento não contorna o `CsrfViewMiddleware`.
+Configure `THREESHIRT_CSRF_TRUSTED_ORIGINS` para as origens exatas necessárias
+em cada ambiente; não inclua a origem local do Vite em produção por padrão.
+O login só informa sucesso quando a verificação real retorna HTTP 200. Não
+há endpoint para consultar a sessão ou encerrar sessão, nem telas de estudante
+além do login nesta etapa.
+
+O frontend não implementa páginas de pesquisa, propostas, votação ou
+resultados. Os serviços de negócio existentes não são endpoints HTTP. A rota
+de imagem `/proposals/<id>/image/` continua protegida no Django: imagens
+pendentes são exclusivas de administradores autorizados e imagens aprovadas
+exigem estudante autenticado ou administrador autorizado.
 
 > O comando `migrate` aplica as migrations pendentes no banco configurado.
 > Antes de usá-lo em um banco com dados importantes, confira o plano e faça
@@ -232,6 +284,11 @@ ambiente de produção.
 ```text
 ThreeShirt/
 ├── README.md
+├── frontend/
+│   ├── package.json
+│   ├── package-lock.json
+│   ├── index.html
+│   └── src/
 └── threeshirt/
     ├── manage.py
     ├── requirements.txt
@@ -282,7 +339,14 @@ desativado; migrations locais devem ser verificadas antes de aplicação.
 
 ## Próximas etapas e limites
 
-- **Planejada:** Fase 2 — Planejamento Visual e Frontend.
+- **Etapa 11:** estrutura técnica inicial do frontend.
+- **Etapa 12.1:** tela de login do estudante integrada às views Django de
+  solicitação/verificação de código, com inicialização protegida do token CSRF.
+- **Ainda não implementado como API HTTP:** contexto de sessão/usuário,
+  consulta e gravação de preferências, consulta/envio de propostas e votos,
+  consulta/publicação de resultados e eventual encerramento de sessão. Esses
+  contratos precisam ser definidos em etapas próprias; as regras de negócio
+  atuais não são endpoints públicos.
 - **Ainda não implementado:** interface de estudante para pesquisa,
   propostas e votação; API para consumo dos resultados; publicação efetiva
   dos resultados.
