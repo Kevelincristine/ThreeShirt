@@ -13,6 +13,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import (
+    DatabaseError,
     IntegrityError,
     OperationalError,
     close_old_connections,
@@ -41,6 +42,7 @@ from .models import ElectionSettings, PreferenceResponse, ShirtProposal, Vote
 from .services import (
     calculate_compatibility,
     get_approved_proposal_compatibilities,
+    get_approved_proposals,
     get_compatibility_tally,
     get_pending_proposal_descriptions,
     get_preference_response,
@@ -94,6 +96,587 @@ def make_proposal_data(image=None, **overrides):
     }
     data.update(overrides)
     return data
+
+
+class StudentDashboardStatusApiTests(TestCase):
+    dashboard_url = "/api/election/student/dashboard/"
+
+    def setUp(self):
+        self.student = User.objects.create_user(
+            username="dashboard_student",
+            email="dashboard_student@escola.com",
+        )
+        UserProfile.objects.create(
+            user=self.student,
+            role=UserProfile.Role.STUDENT,
+        )
+        self.client = Client()
+
+    def get_dashboard(self):
+        return self.client.get(self.dashboard_url)
+
+    def test_anonymous_request_is_rejected_with_json_401(self):
+        response = self.get_dashboard()
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(
+            response.json(),
+            {"error": "Autenticação necessária."},
+        )
+
+    def test_student_without_preferences_or_vote_receives_default_status(self):
+        self.client.force_login(self.student)
+
+        response = self.get_dashboard()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("no-store", response["Cache-Control"])
+        self.assertEqual(
+            response.json(),
+            {
+                "survey_open": False,
+                "voting_open": False,
+                "results_release_authorized": False,
+                "has_preferences": False,
+                "has_voted": False,
+            },
+        )
+
+    def test_student_with_own_preferences_is_reported(self):
+        PreferenceResponse.objects.create(
+            student=self.student,
+            base_color="BLACK",
+            related_to_course=True,
+            wants_animal=False,
+            preferred_animal="",
+            preferred_colors=["BLUE"],
+            wants_collar=True,
+            wants_phrase=False,
+            intends_to_buy=True,
+        )
+        self.client.force_login(self.student)
+
+        response = self.get_dashboard()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["has_preferences"])
+        self.assertFalse(response.json()["has_voted"])
+
+    def test_student_who_voted_is_reported_without_vote_details(self):
+        author = User.objects.create_user(username="dashboard_author")
+        proposal = ShirtProposal.objects.create(
+            author=author,
+            title="Proposta aprovada",
+            description="Descrição da proposta",
+            image="shirt_proposals/dashboard.png",
+            base_color="BLACK",
+            related_to_course=True,
+            additional_colors=["BLUE"],
+            has_collar=True,
+            has_phrase=False,
+            phrase_text="",
+            status=ShirtProposal.Status.APPROVED,
+        )
+        Vote.objects.create(student=self.student, proposal=proposal)
+        self.client.force_login(self.student)
+
+        response = self.get_dashboard()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["has_voted"])
+        self.assertNotIn("proposal", response.json())
+        self.assertNotIn("vote", response.json())
+
+    def test_admin_profile_is_rejected_with_json_403(self):
+        admin = User.objects.create_user(username="dashboard_admin")
+        UserProfile.objects.create(user=admin, role=UserProfile.Role.ADMIN)
+        self.client.force_login(admin)
+
+        response = self.get_dashboard()
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            response.json(),
+            {"error": "Acesso permitido apenas a estudantes ativos."},
+        )
+
+    def test_inactive_student_session_is_rejected_as_anonymous(self):
+        self.student.is_active = False
+        self.student.save(update_fields=["is_active"])
+        self.client.force_login(self.student)
+
+        response = self.get_dashboard()
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(
+            response.json(),
+            {"error": "Autenticação necessária."},
+        )
+
+    def test_dashboard_does_not_expose_other_students_data(self):
+        other_student = User.objects.create_user(
+            username="dashboard_other",
+            email="other-private@escola.com",
+        )
+        UserProfile.objects.create(
+            user=other_student,
+            role=UserProfile.Role.STUDENT,
+        )
+        PreferenceResponse.objects.create(
+            student=other_student,
+            base_color="WHITE",
+            related_to_course=False,
+            wants_animal=True,
+            preferred_animal="Animal privado",
+            preferred_colors=["RED"],
+            wants_collar=False,
+            wants_phrase=True,
+            intends_to_buy=False,
+        )
+        self.client.force_login(self.student)
+
+        response = self.get_dashboard()
+        data = response.json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            set(data),
+            {
+                "survey_open",
+                "voting_open",
+                "results_release_authorized",
+                "has_preferences",
+                "has_voted",
+            },
+        )
+        self.assertNotIn("other-private@escola.com", response.content.decode())
+        self.assertNotIn("Animal privado", response.content.decode())
+
+    def test_survey_open_and_voting_closed_status(self):
+        ElectionSettings.objects.create(survey_open=True)
+        self.client.force_login(self.student)
+
+        response = self.get_dashboard()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["survey_open"])
+        self.assertFalse(response.json()["voting_open"])
+
+    def test_voting_open_and_survey_closed_status(self):
+        ElectionSettings.objects.create(
+            voting_open=True,
+            voting_started_at=timezone.now(),
+        )
+        self.client.force_login(self.student)
+
+        response = self.get_dashboard()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["survey_open"])
+        self.assertTrue(response.json()["voting_open"])
+
+    def test_results_release_flag_follows_domain_service(self):
+        ElectionSettings.objects.create(results_release_authorized=True)
+        self.client.force_login(self.student)
+
+        response = self.get_dashboard()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["results_release_authorized"])
+        self.assertNotIn("results", response.json())
+        self.assertNotIn("winners", response.json())
+
+    def test_database_failure_returns_generic_json_500(self):
+        self.client.force_login(self.student)
+
+        with patch(
+            "election.views.get_preference_response",
+            side_effect=DatabaseError("database details"),
+        ), self.assertLogs("election.views", level="ERROR"):
+            response = self.get_dashboard()
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(
+            response.json(),
+            {"error": "Não foi possível consultar o painel."},
+        )
+        self.assertNotIn("database details", response.content.decode())
+
+
+class StudentPreferencesApiTests(TestCase):
+    preferences_url = "/api/election/student/preferences/"
+
+    def setUp(self):
+        self.student = User.objects.create_user(
+            username="preferences_api_student",
+            email="preferences_api_student@escola.com",
+        )
+        UserProfile.objects.create(
+            user=self.student,
+            role=UserProfile.Role.STUDENT,
+        )
+        self.client = Client()
+
+    def create_preferences(self, student, **overrides):
+        data = {
+            "base_color": "BLACK",
+            "related_to_course": True,
+            "wants_animal": False,
+            "preferred_animal": "",
+            "preferred_colors": ["BLUE", "RED"],
+            "wants_collar": True,
+            "wants_phrase": False,
+            "intends_to_buy": True,
+        }
+        data.update(overrides)
+        return PreferenceResponse.objects.create(student=student, **data)
+
+    def test_anonymous_visitor_receives_json_401(self):
+        response = self.client.get(self.preferences_url)
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(
+            response.json(),
+            {"error": "Autenticação necessária."},
+        )
+
+    def test_student_without_saved_preferences_receives_empty_json_state(self):
+        self.client.force_login(self.student)
+
+        response = self.client.get(self.preferences_url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("no-store", response["Cache-Control"])
+        self.assertEqual(
+            response.json(),
+            {
+                "has_preferences": False,
+                "preferences": None,
+            },
+        )
+
+    def test_student_receives_own_preference_fields_and_json_types(self):
+        self.create_preferences(self.student)
+        self.client.force_login(self.student)
+
+        response = self.client.get(self.preferences_url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {
+                "has_preferences": True,
+                "preferences": {
+                    "base_color": "BLACK",
+                    "related_to_course": True,
+                    "wants_animal": False,
+                    "preferred_animal": "",
+                    "preferred_colors": ["BLUE", "RED"],
+                    "wants_collar": True,
+                    "wants_phrase": False,
+                    "intends_to_buy": True,
+                },
+            },
+        )
+        preferences = response.json()["preferences"]
+        self.assertIsInstance(preferences["base_color"], str)
+        self.assertIsInstance(preferences["related_to_course"], bool)
+        self.assertIsInstance(preferences["preferred_colors"], list)
+        self.assertIsInstance(preferences["intends_to_buy"], bool)
+
+    def test_admin_profile_is_rejected_with_json_403(self):
+        admin = User.objects.create_user(username="preferences_api_admin")
+        UserProfile.objects.create(user=admin, role=UserProfile.Role.ADMIN)
+        self.client.force_login(admin)
+
+        response = self.client.get(self.preferences_url)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            response.json(),
+            {"error": "Acesso permitido apenas a estudantes ativos."},
+        )
+
+    def test_query_parameters_cannot_select_another_students_preferences(self):
+        other_student = User.objects.create_user(
+            username="other_preferences_student",
+            email="private-preferences@escola.com",
+        )
+        UserProfile.objects.create(
+            user=other_student,
+            role=UserProfile.Role.STUDENT,
+        )
+        self.create_preferences(
+            self.student,
+            preferred_animal="Animal próprio",
+        )
+        self.create_preferences(
+            other_student,
+            wants_animal=True,
+            preferred_animal="Animal privado",
+        )
+        self.client.force_login(self.student)
+
+        response = self.client.get(
+            f"{self.preferences_url}?user_id={other_student.pk}"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["preferences"]["preferred_animal"],
+            "Animal próprio",
+        )
+        self.assertNotIn("private-preferences@escola.com", response.content.decode())
+        self.assertNotIn("Animal privado", response.content.decode())
+
+    def test_response_contains_only_authorized_preference_fields(self):
+        self.create_preferences(self.student)
+        self.client.force_login(self.student)
+
+        response = self.client.get(self.preferences_url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            set(response.json()),
+            {"has_preferences", "preferences"},
+        )
+        self.assertEqual(
+            set(response.json()["preferences"]),
+            {
+                "base_color",
+                "related_to_course",
+                "wants_animal",
+                "preferred_animal",
+                "preferred_colors",
+                "wants_collar",
+                "wants_phrase",
+                "intends_to_buy",
+            },
+        )
+        body = response.content.decode()
+        self.assertNotIn("student", body)
+        self.assertNotIn("created_at", body)
+        self.assertNotIn("updated_at", body)
+
+    def test_database_failure_returns_generic_json_500(self):
+        self.client.force_login(self.student)
+
+        with patch(
+            "election.views.get_preference_response",
+            side_effect=DatabaseError("database details"),
+        ), self.assertLogs("election.views", level="ERROR"):
+            response = self.client.get(self.preferences_url)
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(
+            response.json(),
+            {"error": "Não foi possível consultar suas preferências."},
+        )
+        self.assertNotIn("database details", response.content.decode())
+
+
+class ApprovedStudentProposalsApiTests(TestCase):
+    proposals_url = "/api/election/student/proposals/"
+
+    def setUp(self):
+        self.student = User.objects.create_user(
+            username="approved_proposals_student",
+            email="approved_proposals_student@escola.com",
+        )
+        UserProfile.objects.create(
+            user=self.student,
+            role=UserProfile.Role.STUDENT,
+        )
+        self.client = Client()
+
+    def create_proposal(self, title, status, author=None):
+        author = author or User.objects.create_user(
+            username=f"author_{title.lower().replace(' ', '_')}",
+            email="proposal-author-private@escola.com",
+        )
+        return ShirtProposal.objects.create(
+            author=author,
+            title=title,
+            description=f"Descrição visual de {title}.",
+            image=f"shirt_proposals/{title.lower().replace(' ', '-')}.png",
+            base_color=ShirtProposal.BaseColor.BLACK,
+            related_to_course=True,
+            animal="Raposa",
+            additional_colors=["BLUE"],
+            has_collar=True,
+            has_phrase=True,
+            phrase_text="Nossa turma",
+            status=status,
+        )
+
+    def test_anonymous_visitor_is_rejected_with_json_401(self):
+        response = self.client.get(self.proposals_url)
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(
+            response.json(),
+            {"error": "Autenticação necessária."},
+        )
+
+    def test_active_student_receives_approved_proposals(self):
+        proposal = self.create_proposal(
+            "Proposta aprovada",
+            ShirtProposal.Status.APPROVED,
+        )
+        self.client.force_login(self.student)
+
+        response = self.client.get(self.proposals_url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "application/json")
+        self.assertEqual(
+            response.json()["proposals"][0]["id"],
+            proposal.pk,
+        )
+
+    def test_admin_profile_is_rejected_with_json_403(self):
+        admin = User.objects.create_user(username="approved_proposals_admin")
+        UserProfile.objects.create(user=admin, role=UserProfile.Role.ADMIN)
+        self.client.force_login(admin)
+
+        response = self.client.get(self.proposals_url)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            response.json(),
+            {"error": "Acesso permitido apenas a estudantes ativos."},
+        )
+
+    def test_pending_and_rejected_proposals_are_not_listed(self):
+        self.create_proposal(
+            "Aprovada",
+            ShirtProposal.Status.APPROVED,
+        )
+        self.create_proposal(
+            "Pendente",
+            ShirtProposal.Status.PENDING,
+        )
+        self.create_proposal(
+            "Rejeitada",
+            ShirtProposal.Status.REJECTED,
+        )
+        self.client.force_login(self.student)
+
+        response = self.client.get(self.proposals_url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [item["title"] for item in response.json()["proposals"]],
+            ["Aprovada"],
+        )
+
+    def test_empty_list_has_consistent_json_shape(self):
+        self.client.force_login(self.student)
+
+        response = self.client.get(self.proposals_url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"proposals": []})
+
+    def test_response_fields_use_model_values_and_protected_image_route(self):
+        proposal = self.create_proposal(
+            "Camisa da turma",
+            ShirtProposal.Status.APPROVED,
+        )
+        self.client.force_login(self.student)
+
+        response = self.client.get(self.proposals_url)
+        item = response.json()["proposals"][0]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            item,
+            {
+                "id": proposal.pk,
+                "title": "Camisa da turma",
+                "description": "Descrição visual de Camisa da turma.",
+                "image_url": reverse("proposal-image", args=[proposal.pk]),
+                "base_color": ShirtProposal.BaseColor.BLACK,
+                "related_to_course": True,
+                "animal": "Raposa",
+                "additional_colors": ["BLUE"],
+                "has_collar": True,
+                "has_phrase": True,
+                "phrase_text": "Nossa turma",
+            },
+        )
+        self.assertIsInstance(item["id"], int)
+        self.assertIsInstance(item["related_to_course"], bool)
+        self.assertIsInstance(item["additional_colors"], list)
+
+    def test_response_does_not_expose_author_or_internal_image_data(self):
+        proposal = self.create_proposal(
+            "Proposta privada",
+            ShirtProposal.Status.APPROVED,
+        )
+        self.client.force_login(self.student)
+
+        response = self.client.get(self.proposals_url)
+        item = response.json()["proposals"][0]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            set(item),
+            {
+                "id",
+                "title",
+                "description",
+                "image_url",
+                "base_color",
+                "related_to_course",
+                "animal",
+                "additional_colors",
+                "has_collar",
+                "has_phrase",
+                "phrase_text",
+            },
+        )
+        self.assertNotIn(
+            "proposal-author-private@escola.com",
+            response.content.decode(),
+        )
+        self.assertNotIn(proposal.image.name, response.content.decode())
+
+    def test_results_are_newest_first_with_stable_id_tiebreaker(self):
+        older = self.create_proposal(
+            "Mais antiga",
+            ShirtProposal.Status.APPROVED,
+        )
+        newer = self.create_proposal(
+            "Mais recente",
+            ShirtProposal.Status.APPROVED,
+        )
+        self.client.force_login(self.student)
+
+        response = self.client.get(self.proposals_url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [item["id"] for item in response.json()["proposals"]],
+            [newer.pk, older.pk],
+        )
+
+    def test_service_rejects_inactive_and_non_student_users(self):
+        admin = User.objects.create_user(username="service_non_student")
+        UserProfile.objects.create(user=admin, role=UserProfile.Role.ADMIN)
+        inactive = User.objects.create_user(
+            username="service_inactive_student",
+            is_active=False,
+        )
+        UserProfile.objects.create(
+            user=inactive,
+            role=UserProfile.Role.STUDENT,
+        )
+
+        for user in (admin, inactive):
+            with self.subTest(user=user):
+                with self.assertRaises(PermissionDenied):
+                    get_approved_proposals(user)
 
 
 class PreferenceResponseTests(TestCase):

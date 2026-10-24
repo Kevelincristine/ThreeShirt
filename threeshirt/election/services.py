@@ -341,6 +341,14 @@ def get_pending_proposal_descriptions(user):
     )
 
 
+def get_approved_proposals(user):
+    """Return approved proposals to an active student, newest first."""
+    _require_student_user(user)
+    return ShirtProposal.objects.filter(
+        status=ShirtProposal.Status.APPROVED,
+    ).order_by("-created_at", "-pk")
+
+
 def get_vote_tally():
     """Count approved-proposal votes; report other vote records separately.
 

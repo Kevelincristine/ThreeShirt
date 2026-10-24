@@ -9,6 +9,16 @@ urlpatterns = [
         views.initialize_csrf,
         name="initialize_csrf",
     ),
+    path(
+        "session/",
+        views.session_status,
+        name="session_status",
+    ),
+    path(
+        "logout/",
+        views.logout_user,
+        name="logout",
+    ),
     # Solicita um código temporário por e-mail.
     path(
         "request-code/",

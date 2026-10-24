@@ -1,12 +1,19 @@
 import { useRef, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import { Alert } from "../components/feedback/Alert";
+import { Loading } from "../components/feedback/Loading";
+import { useAuth } from "../app/AuthContext";
 import { ApiError, requestLoginCode, verifyLoginCode } from "../services/api";
+import {
+  isLoginCodeAccepted,
+  requestLoginCodeForEmail,
+} from "../services/loginCodeRequest";
 
-type LoginStep = "email" | "code" | "complete";
-type LoginAction = "request" | "verify" | null;
+type LoginStep = "email" | "code" | "session" | "complete";
+type LoginAction = "request" | "verify" | "session" | null;
 
 export function StudentLoginPage() {
+  const { refreshSession } = useAuth();
   const [step, setStep] = useState<LoginStep>("email");
   const [action, setAction] = useState<LoginAction>(null);
   const [email, setEmail] = useState("");
@@ -20,6 +27,40 @@ export function StudentLoginPage() {
     return "Não foi possível concluir a solicitação. Tente novamente.";
   }
 
+  async function confirmSession(successMessage: string): Promise<void> {
+    setAction("session");
+    setError("");
+    try {
+      const session = await refreshSession();
+      if (session.status === "authenticated") {
+        setStep("complete");
+        setNotice(successMessage);
+      } else if (session.status === "anonymous") {
+        setError(
+          "O código foi aceito, mas o servidor não confirmou uma sessão autenticada. Tente verificar novamente.",
+        );
+      } else {
+        setError(
+          "O código foi aceito, mas não foi possível verificar sua sessão. Tente novamente.",
+        );
+      }
+    } catch (reason) {
+      setError(describeError(reason));
+    } finally {
+      setAction(null);
+    }
+  }
+
+  async function retrySessionConfirmation(): Promise<void> {
+    if (actionInProgress.current) return;
+    actionInProgress.current = true;
+    try {
+      await confirmSession("Login realizado com sucesso.");
+    } finally {
+      actionInProgress.current = false;
+    }
+  }
+
   async function sendCode(event?: FormEvent<HTMLFormElement>) {
     event?.preventDefault();
     if (actionInProgress.current) return;
@@ -29,10 +70,25 @@ export function StudentLoginPage() {
     setError("");
     setNotice("");
     try {
-      const response = await requestLoginCode(email.trim().toLowerCase());
-      setStep("code");
-      setCode("");
-      setNotice(response.message);
+      const response = await requestLoginCodeForEmail(email, requestLoginCode);
+      if (isLoginCodeAccepted(response.state)) {
+        setStep("code");
+        setCode("");
+        setNotice(response.message);
+        return;
+      }
+      switch (response.state) {
+        case "unauthorized":
+        case "account_unavailable":
+        case "send_failed":
+        case "invalid_email":
+          setStep("email");
+          setError(response.message);
+          break;
+        case "rate_limited":
+          setError(response.message);
+          break;
+      }
     } catch (reason) {
       setError(describeError(reason));
     } finally {
@@ -54,8 +110,8 @@ export function StudentLoginPage() {
         email.trim().toLowerCase(),
         code,
       );
-      setStep("complete");
-      setNotice(response.message);
+      setStep("session");
+      await confirmSession(response.message);
     } catch (reason) {
       setError(describeError(reason));
     } finally {
@@ -77,7 +133,7 @@ export function StudentLoginPage() {
 
       {error && <Alert variant="error">{error}</Alert>}
       {notice && step !== "complete" && (
-        <Alert variant="success">{notice}</Alert>
+        <Alert variant="info">{notice}</Alert>
       )}
 
       {step === "email" && (
@@ -108,7 +164,8 @@ export function StudentLoginPage() {
       {step === "code" && (
         <>
           <p className="login-email-context">
-            Código solicitado para <strong>{email}</strong>
+            Digite abaixo o código enviado para <strong>{email}</strong>.
+            Verifique também a pasta de spam ou solicite outro código.
           </p>
           <form className="login-form" onSubmit={verifyCode}>
             <div className="form-field">
@@ -165,6 +222,22 @@ export function StudentLoginPage() {
             </button>
           </div>
         </>
+      )}
+
+      {step === "session" && (
+        <div className="login-complete">
+          {action === "session" ? (
+            <Loading label="Código aceito. Confirmando sua sessão..." />
+          ) : (
+            <button
+              className="button button--primary"
+              onClick={() => void retrySessionConfirmation()}
+              type="button"
+            >
+              Tentar verificar novamente
+            </button>
+          )}
+        </div>
       )}
 
       {step === "complete" && (

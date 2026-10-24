@@ -9,7 +9,7 @@ import time
 from datetime import timedelta
 
 from django.conf import settings
-from django.contrib.auth import get_user_model, login
+from django.contrib.auth import get_user_model, login, logout as auth_logout
 from django.contrib.auth.hashers import check_password, make_password
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
@@ -37,6 +37,51 @@ logger = logging.getLogger(__name__)
 def initialize_csrf(request):
     """Provides a CSRF token to the frontend without changing authentication."""
     return JsonResponse({"csrfToken": get_token(request)})
+
+
+@require_GET
+def session_status(request):
+    """Returns the authenticated user's public identity, if available."""
+    user = request.user
+    if not user.is_authenticated:
+        return JsonResponse({"authenticated": False})
+
+    try:
+        profile = user.profile
+    except UserProfile.DoesNotExist:
+        return JsonResponse(
+            {"error": "Perfil de usuário não encontrado."},
+            status=500,
+        )
+
+    role = {
+        UserProfile.Role.STUDENT: "student",
+        UserProfile.Role.ADMIN: "admin",
+    }.get(profile.role)
+    if role is None:
+        return JsonResponse(
+            {"error": "Perfil de usuário inválido."},
+            status=500,
+        )
+
+    return JsonResponse({
+        "authenticated": True,
+        "user": {
+            "id": user.pk,
+            "email": user.email,
+            "role": role,
+        },
+    })
+
+
+@require_POST
+def logout_user(request):
+    """Ends the current Django session."""
+    auth_logout(request)
+    return JsonResponse({
+        "authenticated": False,
+        "message": "Sessão encerrada com sucesso.",
+    })
 
 
 def _run_with_sqlite_lock_retry(operation):
@@ -233,12 +278,8 @@ def request_login_code(request):
 
     email = request.POST.get("email", "").strip().lower()
 
-    response = {
-        "message": (
-            "Se o endereço estiver autorizado, "
-            "você receberá instruções para continuar."
-        )
-    }
+    def response(state, message):
+        return JsonResponse({"state": state, "message": message})
 
     valid_email = True
     try:
@@ -252,15 +293,53 @@ def request_login_code(request):
     }
     is_authorized = valid_email and email in allowed_emails
     rate_limit_email = email if is_authorized else None
-    if not _record_login_request(
+    within_rate_limit = _record_login_request(
         rate_limit_email,
         _request_source(request),
         timezone.now(),
-    ):
-        return JsonResponse(response, status=200)
+    )
 
+    if not valid_email:
+        return response(
+            "invalid_email",
+            "Digite um endereço de e-mail válido.",
+        )
     if not is_authorized:
-        return JsonResponse(response, status=200)
+        return response(
+            "unauthorized",
+            "Este e-mail não está autorizado a acessar o ThreeShirt. "
+            "Utilize seu e-mail escolar autorizado.",
+        )
+    if not within_rate_limit:
+        return response(
+            "rate_limited",
+            "Limite de solicitações atingido. Aguarde um momento e tente "
+            "novamente.",
+        )
+
+    User = get_user_model()
+    try:
+        has_active_account = _run_with_sqlite_lock_retry(
+            lambda: User.objects.filter(
+                email__iexact=email,
+                is_active=True,
+            ).exists()
+        )
+    except Exception as exc:
+        logger.error(
+            "Falha ao verificar elegibilidade para código de acesso (%s).",
+            type(exc).__name__,
+        )
+        return response(
+            "send_failed",
+            "Não foi possível processar a solicitação. Tente novamente.",
+        )
+
+    if not has_active_account:
+        return response(
+            "account_unavailable",
+            "Não há uma conta ativa disponível para este e-mail.",
+        )
 
     try:
         code = f"{secrets.randbelow(1_000_000):06d}"
@@ -278,7 +357,10 @@ def request_login_code(request):
             "Falha ao preparar código de acesso (%s).",
             type(exc).__name__,
         )
-        return JsonResponse(response, status=200)
+        return response(
+            "send_failed",
+            "Não foi possível enviar o código. Tente novamente.",
+        )
 
     try:
         sent_count = send_mail(
@@ -297,11 +379,17 @@ def request_login_code(request):
             "Resultado do envio do código de acesso não confirmado (%s).",
             type(exc).__name__,
         )
-        return JsonResponse(response, status=200)
+        return response(
+            "send_failed",
+            "Não foi possível enviar o código. Tente novamente.",
+        )
 
     if sent_count != 1:
         logger.error("O envio do código de acesso não foi confirmado.")
-        return JsonResponse(response, status=200)
+        return response(
+            "send_failed",
+            "Não foi possível enviar o código. Tente novamente.",
+        )
 
     try:
         _run_with_sqlite_lock_retry(
@@ -312,8 +400,16 @@ def request_login_code(request):
             "E-mail do código enviado, mas ativação no banco não confirmada (%s).",
             type(exc).__name__,
         )
+        return response(
+            "send_failed",
+            "Não foi possível concluir o envio. Tente novamente.",
+        )
 
-    return JsonResponse(response, status=200)
+    return response(
+        "enter_code",
+        "Solicitação aceita pelo serviço de e-mail. Confira sua caixa de "
+        "entrada e a pasta de spam.",
+    )
 
 
 @require_POST

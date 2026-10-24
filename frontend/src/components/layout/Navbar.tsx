@@ -5,11 +5,18 @@ export interface NavbarLink {
   label: string;
 }
 
-interface NavbarProps {
-  links: readonly NavbarLink[];
+export interface NavbarAction {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
 }
 
-export function Navbar({ links }: NavbarProps) {
+interface NavbarProps {
+  links: readonly NavbarLink[];
+  action?: NavbarAction;
+}
+
+export function Navbar({ links, action }: NavbarProps) {
   return (
     <nav aria-label="Navegação principal" className="site-nav">
       <ul className="site-nav__list">
@@ -26,6 +33,18 @@ export function Navbar({ links }: NavbarProps) {
             </NavLink>
           </li>
         ))}
+        {action && (
+          <li>
+            <button
+              className="site-nav__link"
+              disabled={action.disabled}
+              onClick={action.onClick}
+              type="button"
+            >
+              {action.label}
+            </button>
+          </li>
+        )}
       </ul>
     </nav>
   );

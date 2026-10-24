@@ -1,4 +1,11 @@
-import type { ApiMessageResponse } from "../types/api";
+import type {
+  ApiMessageResponse,
+  AuthenticatedSession,
+  LoginCodeRequestResponse,
+  SessionResponse,
+  StudentDashboardResponse,
+} from "../types/api";
+import { isLoginCodeRequestState } from "./loginCodeRequest";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL?.trim() ?? "";
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
@@ -28,6 +35,80 @@ function getMessageResponse(data: unknown, status: number): ApiMessageResponse {
   throw new ApiError(
     "O servidor retornou uma resposta inesperada.",
     status,
+  );
+}
+
+function getLoginCodeRequestResponse(
+  data: unknown,
+  status: number,
+): LoginCodeRequestResponse {
+  if (
+    isRecord(data) &&
+    isLoginCodeRequestState(data.state) &&
+    typeof data.message === "string" &&
+    data.message.trim()
+  ) {
+    return {
+      state: data.state,
+      message: data.message.trim(),
+    };
+  }
+  throw new ApiError(
+    "O servidor retornou uma resposta inesperada.",
+    status,
+  );
+}
+
+function getSessionResponse(data: unknown): SessionResponse {
+  if (isRecord(data) && data.authenticated === false) {
+    return { authenticated: false };
+  }
+
+  if (isRecord(data) && data.authenticated === true && isRecord(data.user)) {
+    const { id, email, role } = data.user;
+    if (
+      typeof id === "number" &&
+      Number.isInteger(id) &&
+      typeof email === "string" &&
+      (role === "student" || role === "admin")
+    ) {
+      const session: AuthenticatedSession = {
+        authenticated: true,
+        user: { id, email, role },
+      };
+      return session;
+    }
+  }
+
+  throw new ApiError(
+    "O servidor retornou uma resposta inesperada.",
+    200,
+  );
+}
+
+function getStudentDashboardResponse(
+  data: unknown,
+): StudentDashboardResponse {
+  if (
+    isRecord(data) &&
+    typeof data.survey_open === "boolean" &&
+    typeof data.voting_open === "boolean" &&
+    typeof data.results_release_authorized === "boolean" &&
+    typeof data.has_preferences === "boolean" &&
+    typeof data.has_voted === "boolean"
+  ) {
+    return {
+      survey_open: data.survey_open,
+      voting_open: data.voting_open,
+      results_release_authorized: data.results_release_authorized,
+      has_preferences: data.has_preferences,
+      has_voted: data.has_voted,
+    };
+  }
+
+  throw new ApiError(
+    "O servidor retornou um estado de painel inesperado.",
+    200,
   );
 }
 
@@ -165,7 +246,7 @@ async function initializeCsrf(): Promise<string> {
 
 export async function requestLoginCode(
   email: string,
-): Promise<ApiMessageResponse> {
+): Promise<LoginCodeRequestResponse> {
   const csrfToken = await initializeCsrf();
   const data = await apiRequest<unknown>(
     "/api/accounts/request-code/",
@@ -175,7 +256,7 @@ export async function requestLoginCode(
     },
     csrfToken,
   );
-  return getMessageResponse(data, 200);
+  return getLoginCodeRequestResponse(data, 200);
 }
 
 export async function verifyLoginCode(
@@ -192,4 +273,35 @@ export async function verifyLoginCode(
     csrfToken,
   );
   return getMessageResponse(data, 200);
+}
+
+export async function getSession(): Promise<SessionResponse> {
+  const data = await apiRequest<unknown>("/api/accounts/session/");
+  return getSessionResponse(data);
+}
+
+export async function logoutSession(): Promise<ApiMessageResponse> {
+  const csrfToken = await initializeCsrf();
+  const data = await apiRequest<unknown>(
+    "/api/accounts/logout/",
+    { method: "POST" },
+    csrfToken,
+  );
+  if (!isRecord(data) || data.authenticated !== false) {
+    throw new ApiError(
+      "O servidor não confirmou o encerramento da sessão.",
+      200,
+    );
+  }
+  return getMessageResponse(data, 200);
+}
+
+export async function getStudentDashboard(
+  signal?: AbortSignal,
+): Promise<StudentDashboardResponse> {
+  const data = await apiRequest<unknown>(
+    "/api/election/student/dashboard/",
+    { signal },
+  );
+  return getStudentDashboardResponse(data);
 }
