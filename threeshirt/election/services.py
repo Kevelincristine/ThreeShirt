@@ -206,6 +206,12 @@ def submit_shirt_proposal(user, data):
     if not isinstance(data, Mapping):
         raise ValidationError("Os dados da proposta devem ser um objeto.")
 
+    settings = ElectionSettings.objects.filter(pk=1).first()
+    if settings is not None and settings.proposal_submission_open is False:
+        raise ValidationError({
+            "proposal_submission": "O envio de propostas está fechado."
+        })
+
     unknown_fields = set(data) - SHIRT_PROPOSAL_FIELDS
     if unknown_fields:
         raise ValidationError({

@@ -41,9 +41,17 @@ export function HomePage() {
               Abrir painel do estudante
             </Link>
           ) : (
-            <Alert variant="info">
-              A área administrativa ainda não está disponível nesta interface.
-            </Alert>
+            <>
+              <Link
+                className="button button--primary login-home-link"
+                to="/admin"
+              >
+                Abrir painel administrativo
+              </Link>
+              <Alert variant="info">
+                A área administrativa está disponível para administradores autorizados.
+              </Alert>
+            </>
           )}
         </>
       )}

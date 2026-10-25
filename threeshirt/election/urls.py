@@ -4,6 +4,46 @@ from . import views
 
 urlpatterns = [
     path(
+        "api/election/admin/dashboard/",
+        views.admin_dashboard,
+        name="admin-dashboard",
+    ),
+    path(
+        "api/election/admin/proposals/",
+        views.admin_proposals,
+        name="admin-proposals",
+    ),
+    path(
+        "api/election/admin/proposals/<int:proposal_id>/review/",
+        views.admin_review_proposal,
+        name="admin-review-proposal",
+    ),
+    path(
+        "api/election/admin/stages/",
+        views.admin_stage_controls,
+        name="admin-stage-controls",
+    ),
+    path(
+        "api/election/admin/users/",
+        views.admin_users,
+        name="admin-users",
+    ),
+    path(
+        "api/election/admin/users/<int:user_id>/role/",
+        views.admin_user_permission,
+        name="admin-user-role",
+    ),
+    path(
+        "api/election/admin/users/<int:user_id>/status/",
+        views.admin_user_status,
+        name="admin-user-status",
+    ),
+    path(
+        "api/election/admin/progress/",
+        views.admin_progress,
+        name="admin-progress",
+    ),
+    path(
         "api/election/student/preferences/",
         views.student_preferences,
         name="student-preferences",

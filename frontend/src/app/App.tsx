@@ -47,6 +47,10 @@ export function App() {
                   { href: "/student/results", label: "Resultados" },
                 ]
               : []),
+            ...(state.status === "authenticated" &&
+            state.user.role === "admin"
+              ? [{ href: "/admin", label: "Administração" }]
+              : []),
             ...(state.status === "authenticated"
               ? []
               : [{ href: "/login", label: "Entrar" }]),

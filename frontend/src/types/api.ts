@@ -108,3 +108,61 @@ export interface StudentResultsResponse {
   }>;
   compatibility_is_tie: boolean;
 }
+
+export interface AdminDashboardCounts {
+  students_total: number;
+  users_total: number;
+  proposals_pending: number;
+  proposals_approved: number;
+  proposals_rejected: number;
+  preferences_responses: number;
+  votes_cast: number;
+  admins_total: number;
+}
+
+export interface AdminDashboardResponse {
+  survey_open: boolean;
+  proposal_submission_open: boolean;
+  voting_open: boolean;
+  results_release_authorized: boolean;
+  counts: AdminDashboardCounts;
+  progress: {
+    survey_participation: number | null;
+    survey_completed: number;
+  };
+}
+
+export interface AdminProposalAuthor {
+  id: number;
+  email: string;
+  full_name: string;
+}
+
+export interface AdminProposal {
+  id: number;
+  title: string;
+  description: string;
+  status: ProposalStatus;
+  base_color: "BLACK" | "WHITE";
+  animal: string;
+  additional_colors: string[];
+  has_collar: boolean;
+  has_phrase: boolean;
+  phrase_text: string;
+  created_at: string;
+  updated_at: string;
+  reviewed_at: string | null;
+  rejection_reason: string;
+  image_url: string;
+  author: AdminProposalAuthor;
+  reviewed_by: AdminProposalAuthor | null;
+}
+
+export interface AdminUser {
+  id: number;
+  email: string;
+  full_name: string;
+  role: "STUDENT" | "ADMIN";
+  is_active: boolean;
+  is_staff: boolean;
+}

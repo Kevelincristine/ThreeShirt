@@ -7,7 +7,9 @@ import { StudentPreferencesPage } from "../pages/StudentPreferencesPage";
 import { StudentProposalsPage } from "../pages/StudentProposalsPage";
 import { StudentGalleryPage } from "../pages/StudentGalleryPage";
 import { StudentResultsPage } from "../pages/StudentResultsPage";
+import { AdminDashboardPage } from "../pages/AdminDashboardPage";
 import { NotFoundPage } from "../pages/NotFoundPage";
+import { RequireAdmin } from "./RequireAdmin";
 import { RequireStudent } from "./RequireStudent";
 
 export const router = createBrowserRouter([
@@ -55,6 +57,14 @@ export const router = createBrowserRouter([
           <RequireStudent>
             <StudentResultsPage />
           </RequireStudent>
+        ),
+      },
+      {
+        path: "admin",
+        element: (
+          <RequireAdmin>
+            <AdminDashboardPage />
+          </RequireAdmin>
         ),
       },
       { path: "*", element: <NotFoundPage /> },

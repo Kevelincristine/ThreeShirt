@@ -1,4 +1,7 @@
 import type {
+  AdminDashboardResponse,
+  AdminProposal,
+  AdminUser,
   ApiMessageResponse,
   AuthenticatedSession,
   LoginCodeRequestResponse,
@@ -333,6 +336,134 @@ function parseStudentResults(data: unknown): StudentResultsResponse {
     };
 }
 
+function getAdminDashboardResponse(data: unknown): AdminDashboardResponse {
+  if (
+    !isRecord(data) ||
+    typeof data.survey_open !== "boolean" ||
+    typeof data.proposal_submission_open !== "boolean" ||
+    typeof data.voting_open !== "boolean" ||
+    typeof data.results_release_authorized !== "boolean" ||
+    !isRecord(data.counts) ||
+    !isRecord(data.progress)
+  ) {
+    throw new ApiError("O painel administrativo retornou dados inválidos.", 200);
+  }
+
+  const counts = data.counts as Record<string, unknown>;
+  const progress = data.progress as Record<string, unknown>;
+  return {
+    survey_open: data.survey_open,
+    proposal_submission_open: data.proposal_submission_open,
+    voting_open: data.voting_open,
+    results_release_authorized: data.results_release_authorized,
+    counts: {
+      students_total: getNumberOrNull(counts.students_total) ?? 0,
+      users_total: getNumberOrNull(counts.users_total) ?? 0,
+      proposals_pending: getNumberOrNull(counts.proposals_pending) ?? 0,
+      proposals_approved: getNumberOrNull(counts.proposals_approved) ?? 0,
+      proposals_rejected: getNumberOrNull(counts.proposals_rejected) ?? 0,
+      preferences_responses: getNumberOrNull(counts.preferences_responses) ?? 0,
+      votes_cast: getNumberOrNull(counts.votes_cast) ?? 0,
+      admins_total: getNumberOrNull(counts.admins_total) ?? 0,
+    },
+    progress: {
+      survey_participation: getNumberOrNull(progress.survey_participation),
+      survey_completed: getNumberOrNull(progress.survey_completed) ?? 0,
+    },
+  };
+}
+
+function parseAdminProposals(data: unknown): AdminProposal[] {
+  if (!isRecord(data) || !Array.isArray(data.proposals)) {
+    throw new ApiError("A lista de propostas administrativas é inválida.", 200);
+  }
+
+  return data.proposals.map((proposal) => {
+    if (
+      !isRecord(proposal) ||
+      typeof proposal.id !== "number" ||
+      typeof proposal.title !== "string" ||
+      typeof proposal.description !== "string" ||
+      !getProposalStatus(proposal.status) ||
+      (proposal.base_color !== "BLACK" && proposal.base_color !== "WHITE") ||
+      typeof proposal.animal !== "string" ||
+      !isStringArray(proposal.additional_colors) ||
+      typeof proposal.has_collar !== "boolean" ||
+      typeof proposal.has_phrase !== "boolean" ||
+      typeof proposal.phrase_text !== "string" ||
+      typeof proposal.created_at !== "string" ||
+      typeof proposal.updated_at !== "string" ||
+      (proposal.reviewed_at !== null && typeof proposal.reviewed_at !== "string") ||
+      typeof proposal.rejection_reason !== "string" ||
+      typeof proposal.image_url !== "string" ||
+      !isRecord(proposal.author) ||
+      typeof proposal.author.id !== "number" ||
+      typeof proposal.author.email !== "string" ||
+      typeof proposal.author.full_name !== "string"
+    ) {
+      throw new ApiError("Uma proposta administrativa possui dados inválidos.", 200);
+    }
+
+    return {
+      id: proposal.id,
+      title: proposal.title,
+      description: proposal.description,
+      status: proposal.status,
+      base_color: proposal.base_color,
+      animal: proposal.animal,
+      additional_colors: proposal.additional_colors,
+      has_collar: proposal.has_collar,
+      has_phrase: proposal.has_phrase,
+      phrase_text: proposal.phrase_text,
+      created_at: proposal.created_at,
+      updated_at: proposal.updated_at,
+      reviewed_at: proposal.reviewed_at ?? null,
+      rejection_reason: proposal.rejection_reason,
+      image_url: proposal.image_url,
+      author: {
+        id: proposal.author.id,
+        email: proposal.author.email,
+        full_name: proposal.author.full_name,
+      },
+      reviewed_by: isRecord(proposal.reviewed_by)
+        ? {
+            id: proposal.reviewed_by.id as number,
+            email: proposal.reviewed_by.email as string,
+            full_name: proposal.reviewed_by.full_name as string,
+          }
+        : null,
+    };
+  });
+}
+
+function parseAdminUsers(data: unknown): AdminUser[] {
+  if (!isRecord(data) || !Array.isArray(data.users)) {
+    throw new ApiError("A lista de usuários administrativos é inválida.", 200);
+  }
+
+  return data.users.map((user) => {
+    if (
+      !isRecord(user) ||
+      typeof user.id !== "number" ||
+      typeof user.email !== "string" ||
+      typeof user.full_name !== "string" ||
+      (user.role !== "STUDENT" && user.role !== "ADMIN") ||
+      typeof user.is_active !== "boolean" ||
+      typeof user.is_staff !== "boolean"
+    ) {
+      throw new ApiError("Um usuário administrativo possui dados inválidos.", 200);
+    }
+    return {
+      id: user.id,
+      email: user.email,
+      full_name: user.full_name,
+      role: user.role,
+      is_active: user.is_active,
+      is_staff: user.is_staff,
+    };
+  });
+}
+
 function getCsrfToken(): string | null {
   const cookie = document.cookie
     .split("; ")
@@ -631,4 +762,131 @@ export async function getStudentResults(
     { signal },
   );
   return parseStudentResults(data);
+}
+
+export async function getAdminDashboard(
+  signal?: AbortSignal,
+): Promise<AdminDashboardResponse> {
+  const data = await apiRequest<unknown>(
+    "/api/election/admin/dashboard/",
+    { signal },
+  );
+  return getAdminDashboardResponse(data);
+}
+
+export async function getAdminProposals(
+  signal?: AbortSignal,
+): Promise<AdminProposal[]> {
+  const data = await apiRequest<unknown>(
+    "/api/election/admin/proposals/",
+    { signal },
+  );
+  return parseAdminProposals(data);
+}
+
+export async function reviewAdminProposal(
+  proposalId: number,
+  decision: "approve" | "reject",
+  reason = "",
+): Promise<{ message: string }> {
+  const data = await apiRequest<unknown>(
+    `/api/election/admin/proposals/${proposalId}/review/`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ decision, reason }),
+    },
+  );
+  if (!isRecord(data) || typeof data.message !== "string") {
+    throw new ApiError("A resposta da revisão administrativa é inválida.", 200);
+  }
+  return { message: data.message };
+}
+
+export async function getAdminStages(
+  signal?: AbortSignal,
+): Promise<{ survey_open: boolean; proposal_submission_open: boolean; voting_open: boolean; results_release_authorized: boolean }> {
+  const data = await apiRequest<unknown>(
+    "/api/election/admin/stages/",
+    { signal },
+  );
+  if (
+    !isRecord(data) ||
+    typeof data.survey_open !== "boolean" ||
+    typeof data.proposal_submission_open !== "boolean" ||
+    typeof data.voting_open !== "boolean" ||
+    typeof data.results_release_authorized !== "boolean"
+  ) {
+    throw new ApiError("O estado das etapas administrativas é inválido.", 200);
+  }
+  return {
+    survey_open: data.survey_open,
+    proposal_submission_open: data.proposal_submission_open,
+    voting_open: data.voting_open,
+    results_release_authorized: data.results_release_authorized,
+  };
+}
+
+export async function updateAdminStage(
+  stage: "survey" | "proposal_submission" | "voting",
+  action: "open" | "close",
+): Promise<{ message: string }> {
+  const data = await apiRequest<unknown>(
+    "/api/election/admin/stages/",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ stage, action }),
+    },
+  );
+  if (!isRecord(data) || typeof data.message !== "string") {
+    throw new ApiError("A resposta ao atualizar a etapa é inválida.", 200);
+  }
+  return { message: data.message };
+}
+
+export async function getAdminUsers(
+  signal?: AbortSignal,
+): Promise<AdminUser[]> {
+  const data = await apiRequest<unknown>(
+    "/api/election/admin/users/",
+    { signal },
+  );
+  return parseAdminUsers(data);
+}
+
+export async function updateAdminUserRole(
+  userId: number,
+  role: "ADMIN" | "STUDENT",
+): Promise<{ message: string }> {
+  const data = await apiRequest<unknown>(
+    `/api/election/admin/users/${userId}/role/`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ role }),
+    },
+  );
+  if (!isRecord(data) || typeof data.message !== "string") {
+    throw new ApiError("A resposta ao atualizar a permissão é inválida.", 200);
+  }
+  return { message: data.message };
+}
+
+export async function updateAdminUserStatus(
+  userId: number,
+  isActive: boolean,
+): Promise<{ message: string }> {
+  const data = await apiRequest<unknown>(
+    `/api/election/admin/users/${userId}/status/`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ is_active: isActive }),
+    },
+  );
+  if (!isRecord(data) || typeof data.message !== "string") {
+    throw new ApiError("A resposta ao atualizar o acesso é inválida.", 200);
+  }
+  return { message: data.message };
 }
