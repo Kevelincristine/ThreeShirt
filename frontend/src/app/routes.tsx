@@ -3,6 +3,10 @@ import { App } from "./App";
 import { HomePage } from "../pages/HomePage";
 import { StudentLoginPage } from "../pages/StudentLoginPage";
 import { StudentDashboardPage } from "../pages/StudentDashboardPage";
+import { StudentPreferencesPage } from "../pages/StudentPreferencesPage";
+import { StudentProposalsPage } from "../pages/StudentProposalsPage";
+import { StudentGalleryPage } from "../pages/StudentGalleryPage";
+import { StudentResultsPage } from "../pages/StudentResultsPage";
 import { NotFoundPage } from "../pages/NotFoundPage";
 import { RequireStudent } from "./RequireStudent";
 
@@ -18,6 +22,38 @@ export const router = createBrowserRouter([
         element: (
           <RequireStudent>
             <StudentDashboardPage />
+          </RequireStudent>
+        ),
+      },
+      {
+        path: "student/preferences",
+        element: (
+          <RequireStudent>
+            <StudentPreferencesPage />
+          </RequireStudent>
+        ),
+      },
+      {
+        path: "student/proposals",
+        element: (
+          <RequireStudent>
+            <StudentProposalsPage />
+          </RequireStudent>
+        ),
+      },
+      {
+        path: "student/gallery",
+        element: (
+          <RequireStudent>
+            <StudentGalleryPage />
+          </RequireStudent>
+        ),
+      },
+      {
+        path: "student/results",
+        element: (
+          <RequireStudent>
+            <StudentResultsPage />
           </RequireStudent>
         ),
       },

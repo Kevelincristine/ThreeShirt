@@ -102,6 +102,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [loadSession]);
 
+  useEffect(() => {
+    function handleSessionExpired(): void {
+      void refreshSession();
+    }
+    window.addEventListener("threeshirt:session-expired", handleSessionExpired);
+    return () =>
+      window.removeEventListener(
+        "threeshirt:session-expired",
+        handleSessionExpired,
+      );
+  }, [refreshSession]);
+
   return (
     <AuthContext.Provider value={{ state, refreshSession, logout }}>
       {children}

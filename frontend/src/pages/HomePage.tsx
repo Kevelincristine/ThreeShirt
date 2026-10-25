@@ -20,8 +20,7 @@ export function HomePage() {
             Entrar como estudante
           </Link>
           <Alert variant="info">
-            As próximas áreas para estudantes serão adicionadas em etapas
-            futuras.
+            Entre para responder à pesquisa, enviar propostas, votar e acompanhar os resultados.
           </Alert>
         </>
       )}

@@ -2,6 +2,7 @@
 from datetime import timedelta
 from io import BytesIO
 from importlib import import_module
+import json
 from pathlib import Path
 from decimal import Decimal
 import threading
@@ -3054,3 +3055,360 @@ class PrivateImageStorageMigrationTests(TestCase):
             ]),
             1,
         )
+
+
+class StudentElectionActionApiTests(TestCase):
+    preferences_url = "/api/election/student/preferences/"
+    submissions_url = "/api/election/student/submissions/"
+    vote_url = "/api/election/student/vote/"
+    results_url = "/api/election/student/results/"
+
+    def setUp(self):
+        self.student = User.objects.create_user(
+            username="student_action_api",
+            email="student_action_api@escola.com",
+        )
+        UserProfile.objects.create(
+            user=self.student,
+            role=UserProfile.Role.STUDENT,
+        )
+        self.client = Client()
+
+    def preference_data(self, **overrides):
+        data = {
+            "base_color": "BLACK",
+            "related_to_course": True,
+            "wants_animal": False,
+            "preferred_animal": "",
+            "preferred_colors": ["BLUE"],
+            "wants_collar": True,
+            "wants_phrase": False,
+            "intends_to_buy": True,
+        }
+        data.update(overrides)
+        return data
+
+    def create_proposal(self, status=ShirtProposal.Status.APPROVED):
+        author = User.objects.create_user(
+            username=f"action_proposal_author_{ShirtProposal.objects.count()}",
+        )
+        return ShirtProposal.objects.create(
+            author=author,
+            title="Proposta aprovada para voto",
+            description="Descrição da proposta.",
+            image="shirt_proposals/action-api.png",
+            base_color="BLACK",
+            related_to_course=True,
+            additional_colors=["BLUE"],
+            has_collar=True,
+            has_phrase=False,
+            phrase_text="",
+            status=status,
+        )
+
+    def submission_data(self, **overrides):
+        data = make_proposal_data(**overrides)
+        for field in ("related_to_course", "has_collar", "has_phrase"):
+            data[field] = "true" if data[field] else "false"
+        data["additional_colors"] = json.dumps(data["additional_colors"])
+        return data
+
+    def test_preferences_post_requires_authentication_and_open_survey(self):
+        response = self.client.post(
+            self.preferences_url,
+            data=json.dumps(self.preference_data()),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 401)
+
+        self.client.force_login(self.student)
+        response = self.client.post(
+            self.preferences_url,
+            data=json.dumps(self.preference_data()),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("survey", response.json()["fields"])
+        self.assertFalse(
+            PreferenceResponse.objects.filter(student=self.student).exists()
+        )
+
+    def test_preferences_post_saves_and_updates_only_own_response(self):
+        ElectionSettings.objects.create(survey_open=True)
+        self.client.force_login(self.student)
+        response = self.client.post(
+            self.preferences_url,
+            data=json.dumps(self.preference_data()),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["has_preferences"])
+        saved = PreferenceResponse.objects.get(student=self.student)
+        self.assertEqual(saved.base_color, "BLACK")
+
+        changed = self.preference_data(base_color="WHITE")
+        response = self.client.post(
+            self.preferences_url,
+            data=json.dumps(changed),
+            content_type="application/json",
+        )
+        saved.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(saved.base_color, "WHITE")
+        self.assertEqual(PreferenceResponse.objects.count(), 1)
+
+    def test_preferences_post_rejects_invalid_fields_and_nonstudent(self):
+        ElectionSettings.objects.create(survey_open=True)
+        self.client.force_login(self.student)
+        invalid = self.preference_data(base_color="PURPLE")
+        response = self.client.post(
+            self.preferences_url,
+            data=json.dumps(invalid),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(
+            PreferenceResponse.objects.filter(student=self.student).exists()
+        )
+
+        admin = User.objects.create_user(username="action_api_admin")
+        UserProfile.objects.create(user=admin, role=UserProfile.Role.ADMIN)
+        self.client.force_login(admin)
+        response = self.client.post(
+            self.preferences_url,
+            data=json.dumps(self.preference_data()),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_student_mutations_require_csrf_token(self):
+        client = Client(enforce_csrf_checks=True)
+        client.force_login(self.student)
+        payload = json.dumps(self.preference_data())
+
+        rejected = client.post(
+            self.preferences_url,
+            data=payload,
+            content_type="application/json",
+        )
+        self.assertEqual(rejected.status_code, 403)
+
+        csrf_response = client.get("/api/accounts/csrf/")
+        token = csrf_response.json()["csrfToken"]
+        ElectionSettings.objects.create(survey_open=True)
+        accepted = client.post(
+            self.preferences_url,
+            data=payload,
+            content_type="application/json",
+            HTTP_X_CSRFTOKEN=token,
+        )
+        self.assertEqual(accepted.status_code, 200)
+
+    def test_submission_post_sets_pending_and_list_is_scoped_to_author(self):
+        with tempfile.TemporaryDirectory() as temp_dir, override_settings(
+            PRIVATE_MEDIA_ROOT=Path(temp_dir),
+        ):
+            self.client.force_login(self.student)
+            payload = self.submission_data()
+            response = self.client.post(self.submissions_url, payload)
+
+            self.assertEqual(response.status_code, 201)
+            proposal = ShirtProposal.objects.get(pk=response.json()["proposal"]["id"])
+            self.assertEqual(proposal.author, self.student)
+            self.assertEqual(proposal.status, ShirtProposal.Status.PENDING)
+
+            other = User.objects.create_user(username="other_submission_owner")
+            ShirtProposal.objects.create(
+                **make_proposal_data(image="shirt_proposals/other.png"),
+                author=other,
+            )
+            response = self.client.get(self.submissions_url)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(
+                [item["id"] for item in response.json()["proposals"]],
+                [proposal.pk],
+            )
+            self.assertNotIn("image", response.json()["proposals"][0])
+
+    def test_submission_rejects_anonymous_admin_and_invalid_image(self):
+        response = self.client.get(self.submissions_url)
+        self.assertEqual(response.status_code, 401)
+
+        admin = User.objects.create_user(username="submission_api_admin")
+        UserProfile.objects.create(user=admin, role=UserProfile.Role.ADMIN)
+        self.client.force_login(admin)
+        response = self.client.get(self.submissions_url)
+        self.assertEqual(response.status_code, 403)
+
+        self.client.force_login(self.student)
+        invalid_payload = self.submission_data(
+            image=SimpleUploadedFile(
+                "invalid.png",
+                b"not an image",
+                content_type="image/png",
+            )
+        )
+        response = self.client.post(self.submissions_url, invalid_payload)
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(
+            ShirtProposal.objects.filter(author=self.student).exists()
+        )
+
+    def test_vote_api_enforces_authentication_settings_approval_and_uniqueness(self):
+        proposal = self.create_proposal()
+        response = self.client.post(
+            self.vote_url,
+            data=json.dumps({"proposal_id": proposal.pk}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 401)
+
+        self.client.force_login(self.student)
+        response = self.client.post(
+            self.vote_url,
+            data=json.dumps({"proposal_id": proposal.pk}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(Vote.objects.filter(student=self.student).exists())
+
+        ElectionSettings.objects.create(
+            voting_open=True,
+            voting_started_at=timezone.now(),
+        )
+        rejected = self.create_proposal(ShirtProposal.Status.PENDING)
+        response = self.client.post(
+            self.vote_url,
+            data=json.dumps({"proposal_id": rejected.pk}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(Vote.objects.filter(student=self.student).exists())
+
+        response = self.client.post(
+            self.vote_url,
+            data=json.dumps({"proposal_id": proposal.pk}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["has_voted"])
+        self.assertEqual(Vote.objects.filter(student=self.student).count(), 1)
+
+        duplicate = self.client.post(
+            self.vote_url,
+            data=json.dumps({"proposal_id": proposal.pk}),
+            content_type="application/json",
+        )
+        self.assertEqual(duplicate.status_code, 400)
+        self.assertEqual(Vote.objects.filter(student=self.student).count(), 1)
+
+    def test_results_api_requires_release_and_closed_voting_and_returns_aggregates(self):
+        proposal = self.create_proposal()
+        response = self.client.get(self.results_url)
+        self.assertEqual(response.status_code, 401)
+
+        self.client.force_login(self.student)
+        response = self.client.get(self.results_url)
+        self.assertEqual(response.status_code, 403)
+
+        ElectionSettings.objects.create(
+            voting_open=True,
+            voting_started_at=timezone.now(),
+            results_release_authorized=True,
+        )
+        response = self.client.get(self.results_url)
+        self.assertEqual(response.status_code, 409)
+
+        ElectionSettings.objects.filter(pk=1).update(voting_open=False)
+        Vote.objects.create(student=self.student, proposal=proposal)
+        response = self.client.get(self.results_url)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["status"], "complete")
+        self.assertEqual(data["total_votes"], 1)
+        self.assertEqual(data["proposals"][0]["proposal_id"], proposal.pk)
+        self.assertNotIn("student", response.content.decode())
+        self.assertNotIn("email", response.content.decode())
+        self.assertNotIn("excluded_proposals", data)
+
+    def test_results_without_votes_reports_no_votes(self):
+        ElectionSettings.objects.create(results_release_authorized=True)
+        self.client.force_login(self.student)
+
+        response = self.client.get(self.results_url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "no_votes")
+        self.assertEqual(response.json()["total_votes"], 0)
+        self.assertEqual(response.json()["winners"], [])
+
+    def test_student_participation_journey_across_election_endpoints(self):
+        with tempfile.TemporaryDirectory() as temp_dir, override_settings(
+            PRIVATE_MEDIA_ROOT=Path(temp_dir),
+        ):
+            ElectionSettings.objects.create(survey_open=True)
+            self.client.force_login(self.student)
+
+            preferences_response = self.client.post(
+                self.preferences_url,
+                data=json.dumps(self.preference_data()),
+                content_type="application/json",
+            )
+            self.assertEqual(preferences_response.status_code, 200)
+
+            submission_response = self.client.post(
+                self.submissions_url,
+                self.submission_data(title="Jornada completa"),
+            )
+            self.assertEqual(submission_response.status_code, 201)
+            proposal_id = submission_response.json()["proposal"]["id"]
+
+            own_submissions = self.client.get(self.submissions_url)
+            self.assertEqual(
+                own_submissions.json()["proposals"][0]["status"],
+                ShirtProposal.Status.PENDING,
+            )
+
+            proposal = ShirtProposal.objects.get(pk=proposal_id)
+            proposal.status = ShirtProposal.Status.APPROVED
+            proposal.save(update_fields=["status"])
+            gallery = self.client.get("/api/election/student/proposals/")
+            self.assertEqual(
+                [item["id"] for item in gallery.json()["proposals"]],
+                [proposal_id],
+            )
+
+            ElectionSettings.objects.filter(pk=1).update(
+                survey_open=False,
+                voting_open=True,
+                voting_started_at=timezone.now(),
+            )
+            vote_response = self.client.post(
+                self.vote_url,
+                data=json.dumps({"proposal_id": proposal_id}),
+                content_type="application/json",
+            )
+            self.assertEqual(vote_response.status_code, 200)
+            self.assertTrue(vote_response.json()["has_voted"])
+
+            ElectionSettings.objects.filter(pk=1).update(
+                voting_open=False,
+                results_release_authorized=True,
+                voting_ended_at=timezone.now(),
+            )
+            results = self.client.get(self.results_url)
+            self.assertEqual(results.status_code, 200)
+            self.assertEqual(results.json()["total_votes"], 1)
+            self.assertEqual(
+                results.json()["winners"][0]["proposal_id"],
+                proposal_id,
+            )
+
+            logout_response = self.client.post("/api/accounts/logout/")
+            self.assertEqual(logout_response.status_code, 200)
+            session_response = self.client.get("/api/accounts/session/")
+            self.assertEqual(
+                session_response.json(),
+                {"authenticated": False},
+            )

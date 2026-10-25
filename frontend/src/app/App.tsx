@@ -39,7 +39,13 @@ export function App() {
             { href: "/", label: "Início" },
             ...(state.status === "authenticated" &&
             state.user.role === "student"
-              ? [{ href: "/student", label: "Painel do estudante" }]
+              ? [
+                  { href: "/student", label: "Painel" },
+                  { href: "/student/preferences", label: "Preferências" },
+                  { href: "/student/proposals", label: "Propostas" },
+                  { href: "/student/gallery", label: "Galeria e votação" },
+                  { href: "/student/results", label: "Resultados" },
+                ]
               : []),
             ...(state.status === "authenticated"
               ? []

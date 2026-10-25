@@ -19,6 +19,21 @@ urlpatterns = [
         name="student-dashboard-status",
     ),
     path(
+        "api/election/student/submissions/",
+        views.student_submissions,
+        name="student-submissions",
+    ),
+    path(
+        "api/election/student/vote/",
+        views.student_vote,
+        name="student-vote",
+    ),
+    path(
+        "api/election/student/results/",
+        views.student_results,
+        name="student-results",
+    ),
+    path(
         "proposals/<int:proposal_id>/image/",
         views.proposal_image,
         name="proposal-image",

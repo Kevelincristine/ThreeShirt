@@ -2,21 +2,27 @@ import type {
   ApiMessageResponse,
   AuthenticatedSession,
   LoginCodeRequestResponse,
+  ProposalStatus,
   SessionResponse,
   StudentDashboardResponse,
+  StudentPreferences,
+  StudentPreferencesResponse,
+  StudentProposal,
+  StudentResultsResponse,
+  StudentSubmission,
 } from "../types/api";
-import { isLoginCodeRequestState } from "./loginCodeRequest";
+import { isLoginCodeRequestState } from "./loginCodeRequest.ts";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL?.trim() ?? "";
+const API_BASE_URL = import.meta.env?.VITE_API_BASE_URL?.trim() ?? "";
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
 export class ApiError extends Error {
-  constructor(
-    message: string,
-    public readonly status: number,
-  ) {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
     super(message);
     this.name = "ApiError";
+    this.status = status;
   }
 }
 
@@ -105,11 +111,226 @@ function getStudentDashboardResponse(
       has_voted: data.has_voted,
     };
   }
-
   throw new ApiError(
     "O servidor retornou um estado de painel inesperado.",
     200,
   );
+}
+
+const STUDENT_COLORS = new Set([
+    "RED",
+    "BLUE",
+    "YELLOW",
+    "GREEN",
+    "ORANGE",
+    "PURPLE",
+    "PINK",
+    "BROWN",
+    "BLACK",
+    "WHITE",
+]);
+
+function isStringArray(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.every((item: unknown) => typeof item === "string")
+  );
+}
+
+function isStudentPreferences(value: unknown): value is StudentPreferences {
+    return (
+      isRecord(value) &&
+      (value.base_color === "BLACK" || value.base_color === "WHITE") &&
+      typeof value.related_to_course === "boolean" &&
+      typeof value.wants_animal === "boolean" &&
+      typeof value.preferred_animal === "string" &&
+      isStringArray(value.preferred_colors) &&
+      value.preferred_colors.every((color) => STUDENT_COLORS.has(color)) &&
+      typeof value.wants_collar === "boolean" &&
+      typeof value.wants_phrase === "boolean" &&
+      typeof value.intends_to_buy === "boolean"
+    );
+}
+
+function getStudentPreferencesResponse(
+  data: unknown,
+): StudentPreferencesResponse {
+    if (
+      isRecord(data) &&
+      data.has_preferences === false &&
+      data.preferences === null
+    ) {
+      return { has_preferences: false, preferences: null };
+    }
+    if (
+      isRecord(data) &&
+      data.has_preferences === true &&
+      isStudentPreferences(data.preferences)
+    ) {
+      return { has_preferences: true, preferences: data.preferences };
+    }
+    throw new ApiError("As preferências recebidas são inválidas.", 200);
+}
+
+function getApprovedProposals(data: unknown): StudentProposal[] {
+    if (!isRecord(data) || !Array.isArray(data.proposals)) {
+      throw new ApiError("A galeria recebida é inválida.", 200);
+    }
+    return data.proposals.map((proposal) => {
+      if (
+        !isRecord(proposal) ||
+        typeof proposal.id !== "number" ||
+        typeof proposal.title !== "string" ||
+        typeof proposal.description !== "string" ||
+        typeof proposal.image_url !== "string" ||
+        (proposal.base_color !== "BLACK" && proposal.base_color !== "WHITE") ||
+        typeof proposal.related_to_course !== "boolean" ||
+        typeof proposal.animal !== "string" ||
+        !isStringArray(proposal.additional_colors) ||
+        typeof proposal.has_collar !== "boolean" ||
+        typeof proposal.has_phrase !== "boolean" ||
+        typeof proposal.phrase_text !== "string"
+      ) {
+        throw new ApiError("Uma proposta recebida pela galeria é inválida.", 200);
+      }
+      return {
+        id: proposal.id,
+        title: proposal.title,
+        description: proposal.description,
+        image_url: proposal.image_url,
+        base_color: proposal.base_color,
+        related_to_course: proposal.related_to_course,
+        animal: proposal.animal,
+        additional_colors: proposal.additional_colors,
+        has_collar: proposal.has_collar,
+        has_phrase: proposal.has_phrase,
+        phrase_text: proposal.phrase_text,
+      };
+    });
+}
+
+function getProposalStatus(value: unknown): value is ProposalStatus {
+    return value === "PENDING" || value === "APPROVED" || value === "REJECTED";
+}
+
+function parseStudentSubmissions(data: unknown): StudentSubmission[] {
+    if (!isRecord(data) || !Array.isArray(data.proposals)) {
+      throw new ApiError("O acompanhamento de propostas é inválido.", 200);
+    }
+    return data.proposals.map((proposal) => {
+      if (
+        !isRecord(proposal) ||
+        typeof proposal.id !== "number" ||
+        typeof proposal.title !== "string" ||
+        typeof proposal.description !== "string" ||
+        !getProposalStatus(proposal.status) ||
+        typeof proposal.created_at !== "string"
+      ) {
+        throw new ApiError("Uma proposta enviada possui dados inválidos.", 200);
+      }
+      return {
+        id: proposal.id,
+        title: proposal.title,
+        description: proposal.description,
+        status: proposal.status,
+        created_at: proposal.created_at,
+      };
+    });
+}
+
+function getNumberOrNull(value: unknown): number | null {
+  if (value === null) return null;
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed)) {
+    throw new ApiError("Um valor estatístico recebido é inválido.", 200);
+  }
+  return parsed;
+}
+
+function parseStudentResults(data: unknown): StudentResultsResponse {
+    if (
+      !isRecord(data) ||
+      (data.status !== "complete" && data.status !== "no_votes") ||
+      typeof data.total_votes !== "number" ||
+      !Array.isArray(data.proposals) ||
+      !Array.isArray(data.winners) ||
+      typeof data.is_tie !== "boolean" ||
+      (data.compatibility_status !== "available" &&
+        data.compatibility_status !== "insufficient_data") ||
+      !Array.isArray(data.compatibility_winners) ||
+      typeof data.compatibility_is_tie !== "boolean"
+    ) {
+      throw new ApiError("Os resultados recebidos são inválidos.", 200);
+    }
+
+    const proposals = data.proposals.map((item) => {
+      if (
+        !isRecord(item) ||
+        typeof item.proposal_id !== "number" ||
+        typeof item.title !== "string" ||
+        typeof item.vote_count !== "number" ||
+        typeof item.valid_assessments !== "number"
+      ) {
+        throw new ApiError("Uma estatística recebida é inválida.", 200);
+      }
+      return {
+        proposal_id: item.proposal_id,
+        title: item.title,
+        vote_count: item.vote_count,
+        percentage: getNumberOrNull(item.percentage),
+        compatibility: getNumberOrNull(item.compatibility),
+        valid_assessments: item.valid_assessments,
+      };
+    });
+    const winners = data.winners.map((item) => {
+      if (
+        !isRecord(item) ||
+        typeof item.proposal_id !== "number" ||
+        typeof item.title !== "string" ||
+        typeof item.vote_count !== "number"
+      ) {
+        throw new ApiError("A lista de vencedoras recebida é inválida.", 200);
+      }
+      return {
+        proposal_id: item.proposal_id,
+        title: item.title,
+        vote_count: item.vote_count,
+        percentage: getNumberOrNull(item.percentage),
+      };
+    });
+    const compatibilityWinners = data.compatibility_winners.map((item) => {
+      if (
+        !isRecord(item) ||
+        typeof item.proposal_id !== "number" ||
+        typeof item.title !== "string" ||
+        typeof item.valid_assessments !== "number" ||
+        (item.status !== "available" && item.status !== "insufficient_data")
+      ) {
+        throw new ApiError("A compatibilidade recebida é inválida.", 200);
+      }
+      const status: "available" | "insufficient_data" =
+        item.status === "available" ? "available" : "insufficient_data";
+      return {
+        proposal_id: item.proposal_id,
+        title: item.title,
+        valid_assessments: item.valid_assessments,
+        average_compatibility: getNumberOrNull(item.average_compatibility),
+        status,
+      };
+    });
+
+    return {
+      status: data.status,
+      total_votes: data.total_votes,
+      proposals,
+      winners,
+      is_tie: data.is_tie,
+      compatibility_status: data.compatibility_status === "available"
+        ? "available"
+        : "insufficient_data",
+      compatibility_winners: compatibilityWinners,
+      compatibility_is_tie: data.compatibility_is_tie,
+    };
 }
 
 function getCsrfToken(): string | null {
@@ -227,6 +448,13 @@ export async function apiRequest<T>(
 
   const data = await readResponse(response);
   if (!response.ok) {
+    if (
+      response.status === 401 &&
+      path.startsWith("/api/election/student/") &&
+      typeof window !== "undefined"
+    ) {
+      window.dispatchEvent(new Event("threeshirt:session-expired"));
+    }
     throw new ApiError(getErrorMessage(data, response.status), response.status);
   }
 
@@ -304,4 +532,103 @@ export async function getStudentDashboard(
     { signal },
   );
   return getStudentDashboardResponse(data);
+}
+
+export async function getStudentPreferences(
+  signal?: AbortSignal,
+): Promise<StudentPreferencesResponse> {
+  const data = await apiRequest<unknown>(
+    "/api/election/student/preferences/",
+    { signal },
+  );
+  return getStudentPreferencesResponse(data);
+}
+
+export async function saveStudentPreferences(
+  preferences: StudentPreferences,
+): Promise<ApiMessageResponse & StudentPreferencesResponse> {
+  const data = await apiRequest<unknown>(
+    "/api/election/student/preferences/",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(preferences),
+    },
+  );
+  if (!isRecord(data) || typeof data.message !== "string") {
+    throw new ApiError("A resposta ao salvar preferências é inválida.", 200);
+  }
+  return {
+    ...getStudentPreferencesResponse(data),
+    message: data.message,
+  };
+}
+
+export async function getApprovedStudentProposals(
+  signal?: AbortSignal,
+): Promise<StudentProposal[]> {
+  const data = await apiRequest<unknown>(
+    "/api/election/student/proposals/",
+    { signal },
+  );
+  return getApprovedProposals(data);
+}
+
+export async function getStudentSubmissions(
+  signal?: AbortSignal,
+): Promise<StudentSubmission[]> {
+  const data = await apiRequest<unknown>(
+    "/api/election/student/submissions/",
+    { signal },
+  );
+  return parseStudentSubmissions(data);
+}
+
+export async function submitStudentProposal(
+  payload: FormData,
+): Promise<{ id: number; title: string; description: string; status: ProposalStatus }> {
+  const data = await apiRequest<unknown>(
+    "/api/election/student/submissions/",
+    { method: "POST", body: payload },
+  );
+  if (
+    !isRecord(data) ||
+    !isRecord(data.proposal) ||
+    typeof data.proposal.id !== "number" ||
+    typeof data.proposal.title !== "string" ||
+    typeof data.proposal.description !== "string" ||
+    !getProposalStatus(data.proposal.status)
+  ) {
+    throw new ApiError("A resposta ao enviar a proposta é inválida.", 201);
+  }
+  return {
+    id: data.proposal.id,
+    title: data.proposal.title,
+    description: data.proposal.description,
+    status: data.proposal.status,
+  };
+}
+
+export async function castStudentVote(proposalId: number): Promise<void> {
+  const data = await apiRequest<unknown>(
+    "/api/election/student/vote/",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ proposal_id: proposalId }),
+    },
+  );
+  if (!isRecord(data) || data.has_voted !== true) {
+    throw new ApiError("O servidor não confirmou o registro do voto.", 200);
+  }
+}
+
+export async function getStudentResults(
+  signal?: AbortSignal,
+): Promise<StudentResultsResponse> {
+  const data = await apiRequest<unknown>(
+    "/api/election/student/results/",
+    { signal },
+  );
+  return parseStudentResults(data);
 }

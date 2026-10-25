@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { Alert } from "../components/feedback/Alert";
 import { Loading } from "../components/feedback/Loading";
 import { getStudentDashboard } from "../services/api";
@@ -133,10 +134,22 @@ export function StudentDashboardPage() {
               }
             />
           </dl>
-          <Alert variant="info">
-            Este painel é informativo. As ações de preferências e votação ainda
-            não estão disponíveis nesta interface.
-          </Alert>
+          <nav aria-label="Etapas da participação" className="student-journey">
+            <Link className="button button--primary" to="/student/preferences">
+              Responder pesquisa
+            </Link>
+            <Link className="button button--secondary" to="/student/proposals">
+              Enviar ou acompanhar propostas
+            </Link>
+            <Link className="button button--secondary" to="/student/gallery">
+              Ver propostas e votar
+            </Link>
+            {state.dashboard.results_release_authorized && (
+              <Link className="button button--secondary" to="/student/results">
+                Consultar resultados
+              </Link>
+            )}
+          </nav>
         </>
       )}
     </section>

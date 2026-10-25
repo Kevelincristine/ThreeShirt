@@ -10,11 +10,10 @@ registrar preferências e propostas, enquanto administradores controlam a
 moderação e a votação. A compatibilidade entre preferências e propostas
 complementa a apuração dos votos, sem substituir a escolha democrática.
 
-> **Estado atual:** regras de negócio do backend implementadas e cobertas por
-> testes automatizados. A Etapa 12.1 adiciona o login de estudante à estrutura
-> React do frontend. Há APIs de leitura do painel, das propostas aprovadas e
-> das próprias preferências; APIs para envio/edição, votação e resultados
-> ainda não estão implementadas. O projeto não é um serviço de produção.
+> **Estado atual:** a jornada do estudante da Etapa 12 está integrada ao
+> backend: login por código, sessão, logout, pesquisa, envio e acompanhamento
+> de propostas, galeria aprovada, voto e consulta de resultados autorizados.
+> O projeto permanece em desenvolvimento e não é um serviço de produção.
 
 ## Conteúdo
 
@@ -24,7 +23,7 @@ complementa a apuração dos votos, sem substituir a escolha democrática.
 - [Arquitetura](#arquitetura)
 - [Tecnologias](#tecnologias)
 - [Executar localmente no Windows](#executar-localmente-no-windows)
-- [Frontend (Etapa 12.1)](#frontend-etapa-121)
+- [Frontend (Etapa 12)](#frontend-etapa-12)
 - [Testes e validação](#testes-e-validação)
 - [Estrutura do repositório](#estrutura-do-repositório)
 - [Processo de desenvolvimento](#processo-de-desenvolvimento)
@@ -34,24 +33,22 @@ complementa a apuração dos votos, sem substituir a escolha democrática.
 
 | Área | Estado |
 | --- | --- |
-| Login por código temporário enviado ao e-mail | Implementado no backend |
-| Pesquisa de preferências individual | Serviço de negócio; consulta própria disponível por API |
-| Cadastro de propostas por estudantes | Implementado no serviço de negócio |
+| Login por código, sessão, logout e proteção da área estudante | Implementados no backend e integrados no frontend |
+| Pesquisa individual de preferências | Consulta e gravação próprias disponíveis por API e formulário React; gravação depende da pesquisa aberta |
+| Cadastro e acompanhamento de propostas | Envio por API e formulário; estudante acompanha somente propostas próprias |
 | Moderação de propostas no Django Admin | Implementada |
-| Armazenamento e entrega protegida de imagens | Implementados |
+| Armazenamento e entrega protegida de imagens | Implementados; a galeria lista somente propostas aprovadas |
 | Abertura e encerramento manual da votação | Implementados no Django Admin |
-| Voto único em proposta aprovada | Implementado no serviço de negócio |
-| Apuração de votos, percentuais e empates | Implementada no serviço de negócio |
-| Média de compatibilidade com a pesquisa | Implementada no serviço de negócio |
-| Autorização persistente para divulgação futura | Implementada; inicia desativada |
-| Interface de estudante e publicação/consulta de resultados | Não implementadas |
+| Voto único em proposta aprovada | Implementado no backend, com unicidade no banco e confirmação na interface |
+| Apuração de votos, percentuais e empates | API e tela agregadas, liberadas após autorização e encerramento da votação |
+| Média de compatibilidade com a pesquisa | API e tela agregadas; respostas individuais não são expostas |
+| Autorização persistente para divulgação | Controlada pelo administrador; começa desativada |
 
-O envio e a edição de preferências, a submissão de propostas e a votação estão
-disponíveis como serviços internos do backend, não como APIs HTTP de estudante.
-As APIs de leitura do painel, das propostas aprovadas e das próprias
-preferências estão documentadas abaixo. Também existem rotas para
-solicitação/verificação do código de login e entrega protegida das imagens de
-propostas.
+O estudante pode editar suas próprias preferências enquanto a pesquisa estiver
+aberta. Propostas enviadas seguem pendentes até moderação administrativa; não
+há edição de propostas pelo estudante. Um voto só é aceito uma vez, durante a
+votação aberta, para uma proposta aprovada. Os resultados só são retornados
+depois do encerramento e da autorização administrativa.
 
 ## Fluxo do sistema
 
@@ -64,7 +61,7 @@ flowchart TD
     E --> F[Estudantes elegíveis registram um voto]
     F --> G[Serviço calcula votos e compatibilidade]
     G --> H[Administrador autoriza eventual divulgação]
-    H --> I[Publicação futura, ainda não implementada]
+    H --> I[Estudantes consultam resultados agregados autorizados]
 ```
 
 ## Regras e decisões técnicas
@@ -119,9 +116,9 @@ e-mail; nesse caso nenhum código novo é ativado e o código anterior é mantid
 
 `ElectionSettings.results_release_authorized` persiste a decisão
 administrativa, começa desativado e é controlado pelas permissões do Django
-Admin já existentes. Calcular resultados não habilita divulgação. Não há,
-nesta etapa, endpoint, tela ou mecanismo que efetivamente publique ou
-restrinja a consulta dos resultados.
+Admin já existentes. Calcular resultados não habilita divulgação. A API exige
+estudante ativo, autorização administrativa e votação encerrada; sem essas
+condições, os dados agregados não são retornados.
 
 ### Imagens, permissões e integridade
 
@@ -154,9 +151,9 @@ restrinja a consulta dos resultados.
   URLs públicas; a view protegida valida e entrega somente arquivos
   permitidos.
 - **Frontend**: `frontend/` contém a interface React, TypeScript e Vite, com
-  login de estudante por código. O proxy de desenvolvimento encaminha `/api`
-  e `/proposals` ao Django sem alterar os caminhos. Isso não substitui a
-  configuração de segurança necessária para outros ambientes.
+  login por código, contexto de sessão e telas de preferências, propostas,
+  galeria/votação e resultados. O proxy de desenvolvimento encaminha `/api`
+  e `/proposals` ao Django sem alterar os caminhos.
 - **Testes**: `accounts/tests.py` e `election/tests.py` verificam regras de
   negócio, permissões, migrações de imagem e concorrência SQLite com conexões
   independentes.
@@ -235,7 +232,7 @@ respostas não incluem códigos, credenciais ou detalhes SMTP. `enter_code`
 confirma aceitação pelo backend de e-mail, não entrega final na caixa postal.
 A verificação do código continua sendo feita pelo backend.
 
-### Frontend (Etapa 12.1)
+### Frontend (Etapa 12)
 
 Instale e execute o frontend em um segundo terminal, na raiz do repositório:
 
@@ -254,6 +251,7 @@ Verifique o frontend com:
 
 ```powershell
 npm --prefix .\frontend run typecheck
+npm --prefix .\frontend test
 npm --prefix .\frontend run build
 ```
 
@@ -263,9 +261,8 @@ Antes de cada POST, o cliente busca um token CSRF em
 sessão. O proxy de desenvolvimento não contorna o `CsrfViewMiddleware`.
 Configure `THREESHIRT_CSRF_TRUSTED_ORIGINS` para as origens exatas necessárias
 em cada ambiente; não inclua a origem local do Vite em produção por padrão.
-O login só informa sucesso quando a verificação real retorna HTTP 200. Não
-há endpoint para encerrar sessão nem telas de estudante além do login nesta
-etapa. `GET /api/accounts/session/` consulta a sessão atual: retorna HTTP 200
+O login só informa sucesso quando a verificação real retorna HTTP 200.
+`GET /api/accounts/session/` consulta a sessão atual: retorna HTTP 200
 com `{"authenticated": false}` para visitantes; para usuários autenticados,
 retorna `authenticated: true` e `user` com `id`, `email` e papel (`student` ou
 `admin`) lido do perfil armazenado no backend. A consulta não altera a sessão
@@ -279,16 +276,26 @@ Ele não retorna respostas, votos ou resultados. `GET
 propostas aprovadas, em ordem da mais recente para a mais antiga, com
 desempate determinístico por identificador. A resposta contém os campos
 visuais da proposta e aponta para a rota de imagem protegida, sem revelar
-dados do autor ou caminho interno do arquivo. `GET
-/api/election/student/preferences/` consulta somente as preferências do
-estudante autenticado: retorna `has_preferences: false` e `preferences: null`
-se ainda não houver resposta; caso exista, retorna `has_preferences: true` e
-os campos da resposta, sem identificadores ou timestamps. Os serviços de
-negócio para criar/editar preferências, enviar propostas, votar e apurar
-resultados ainda não são endpoints HTTP. A rota de imagem
-`/proposals/<id>/image/` continua protegida no Django: imagens pendentes são
-exclusivas de administradores autorizados e imagens aprovadas exigem
-estudante autenticado ou administrador autorizado.
+dados do autor ou caminho interno do arquivo.
+
+`GET /api/election/student/preferences/` consulta somente as preferências do
+estudante autenticado. `POST` no mesmo caminho cria ou atualiza a resposta
+enquanto a pesquisa estiver aberta. `GET /api/election/student/submissions/`
+retorna os estados e descrições das propostas do próprio estudante; `POST`
+no mesmo caminho recebe os campos e a imagem multipart, sempre criando uma
+proposta pendente. O estudante não pode editar propostas já enviadas.
+
+`POST /api/election/student/vote/` recebe `{"proposal_id": <id>}` e delega ao
+serviço de votação, que valida estudante ativo, votação aberta, proposta
+aprovada e voto único. `GET /api/election/student/results/` fornece somente
+contagens, percentuais, compatibilidade média e vencedoras; retorna HTTP 403
+se a divulgação não foi autorizada e HTTP 409 enquanto a votação estiver
+aberta. A API não retorna votos nem respostas individuais.
+
+A rota `/proposals/<id>/image/` continua protegida no Django: imagens
+pendentes são exclusivas de administradores autorizados, imagens aprovadas
+exigem estudante autenticado ou administrador autorizado, e propostas
+rejeitadas não são servidas.
 
 > O comando `migrate` aplica as migrations pendentes no banco configurado.
 > Antes de usá-lo em um banco com dados importantes, confira o plano e faça
@@ -301,19 +308,22 @@ Com o ambiente virtual ativado, na pasta `threeshirt`:
 ```powershell
 python manage.py check
 python manage.py makemigrations --check --dry-run
-python manage.py test election accounts
+python manage.py test
 ```
 
-Na revisão local de encerramento das Etapas 5 a 8:
+Para o frontend, na raiz do repositório:
 
-- `manage.py check`: sem problemas identificados.
-- `manage.py makemigrations --check --dry-run`: nenhuma migration adicional
-  detectada.
-- `manage.py test election accounts`: **130 testes aprovados**.
-- `git diff --check`: sem erros de whitespace.
+```powershell
+npm --prefix .\frontend test
+npm --prefix .\frontend run typecheck
+npm --prefix .\frontend run build
+git diff --check
+```
 
-Esses resultados são de uma execução local específica, não de CI ou de um
-ambiente de produção.
+Os testes Django cobrem permissões, validação, CSRF, armazenamento privado,
+aprovação, voto único, concorrência e apuração. Os testes frontend cobrem
+contratos da API, formulários, estados das telas, confirmação de voto,
+resultados e expiração da sessão.
 
 ## Estrutura do repositório
 
@@ -367,7 +377,7 @@ modelos e serviços Django existentes:
 5. A apuração agrega votos, mantém visíveis os votos excluídos por status e
    calcula médias individuais sem converter dados insuficientes em zero.
 6. A autorização administrativa de divulgação é persistente e separada do
-   cálculo; publicação e apresentação continuam planejadas.
+   cálculo; a API e a tela exibem somente resultados agregados autorizados.
 
 As decisões são cobertas por testes automatizados das aplicações `election`
 e `accounts`. A migration `0005` adiciona a autorização com valor inicial
@@ -376,16 +386,12 @@ desativado; migrations locais devem ser verificadas antes de aplicação.
 ## Próximas etapas e limites
 
 - **Etapa 11:** estrutura técnica inicial do frontend.
-- **Etapa 12.1:** tela de login do estudante integrada às views Django de
-  solicitação/verificação de código, com inicialização protegida do token CSRF.
-- **Ainda não implementado como API HTTP:** contexto de sessão/usuário,
-  consulta e gravação de preferências, consulta/envio de propostas e votos,
-  consulta/publicação de resultados e eventual encerramento de sessão. Esses
-  contratos precisam ser definidos em etapas próprias; as regras de negócio
-  atuais não são endpoints públicos.
-- **Ainda não implementado:** interface de estudante para pesquisa,
-  propostas e votação; API para consumo dos resultados; publicação efetiva
-  dos resultados.
+- **Etapa 12:** jornada do estudante integrada, incluindo login por código,
+  sessão, logout, pesquisa, propostas, votação e resultados autorizados.
+- **Limites restantes:** não há interface administrativa React; configuração,
+  moderação e liberação de resultados permanecem no Django Admin. O projeto
+  ainda exige configuração e revisão próprias antes de qualquer uso em
+  produção.
 - **Ainda não confirmado:** equipe, responsabilidades individuais,
   implantação e operação em produção. Por isso, este README não atribui
   créditos pessoais nem declara o sistema pronto para uso real.

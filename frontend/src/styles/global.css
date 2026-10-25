@@ -468,6 +468,164 @@ p {
   font-weight: 800;
 }
 
+.student-page {
+  display: grid;
+  gap: var(--space-6);
+}
+
+.student-page__header,
+.student-page__panel,
+.student-form,
+.student-submissions,
+.results-panel {
+  max-width: none;
+  margin: 0;
+}
+
+.student-page__header h1 {
+  margin-block: var(--space-2) var(--space-4);
+  color: var(--color-navy);
+  font-size: clamp(2rem, 5vw, 3rem);
+}
+
+.student-form {
+  display: grid;
+  gap: var(--space-5);
+}
+
+.form-field select,
+.form-field textarea {
+  width: 100%;
+  min-height: 48px;
+  padding: var(--space-3) var(--space-4);
+  border: var(--border-style);
+  border-radius: var(--radius-small);
+  background: var(--color-white);
+  color: var(--color-text);
+  font: inherit;
+}
+
+.form-field textarea {
+  min-height: 140px;
+  resize: vertical;
+}
+
+.choice-fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: var(--space-4);
+  border: var(--border-style);
+  border-radius: var(--radius-small);
+}
+
+.choice-fieldset legend {
+  padding-inline: var(--space-2);
+  color: var(--color-navy);
+  font-weight: 800;
+}
+
+.choice-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--space-3);
+}
+
+.choice-option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.choice-option input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--color-blue);
+}
+
+.student-journey {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.shirt-gallery {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-6);
+}
+
+.shirt-gallery__item {
+  display: grid;
+  align-content: start;
+  gap: var(--space-4);
+}
+
+.shirt-gallery__vote {
+  justify-self: start;
+}
+
+.submission-list,
+.results-list {
+  display: grid;
+  gap: var(--space-4);
+  margin: var(--space-5) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.submission-list__item,
+.results-list__item {
+  padding: var(--space-4);
+  border: var(--border-style);
+  border-radius: var(--radius-small);
+}
+
+.submission-list__item h3 {
+  margin-bottom: var(--space-2);
+}
+
+.submission-list__item p + p,
+.submission-list__item time {
+  display: block;
+  margin-top: var(--space-2);
+}
+
+.submission-list__item time,
+.results-list__heading span {
+  color: var(--color-text-secondary);
+  font-size: 0.9rem;
+}
+
+.results-panel h2 {
+  margin-bottom: var(--space-4);
+}
+
+.results-winner {
+  margin-top: var(--space-4);
+}
+
+.results-list__heading {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.results-bar {
+  height: 12px;
+  margin-top: var(--space-3);
+  overflow: hidden;
+  border-radius: var(--radius-pill);
+  background: var(--color-paper);
+}
+
+.results-bar span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--color-blue);
+}
+
 @keyframes spin {
   to {
     transform: rotate(360deg);
@@ -504,10 +662,18 @@ p {
   .student-dashboard__grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .shirt-gallery {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (min-width: 960px) {
   .student-dashboard__grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .shirt-gallery {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
