@@ -99,6 +99,7 @@ def make_proposal_data(image=None, **overrides):
     return data
 
 
+@override_settings(ADMIN_EMAILS=["dashboard_admin@escola.com"])
 class StudentDashboardStatusApiTests(TestCase):
     dashboard_url = "/api/election/student/dashboard/"
 
@@ -188,18 +189,42 @@ class StudentDashboardStatusApiTests(TestCase):
         self.assertNotIn("proposal", response.json())
         self.assertNotIn("vote", response.json())
 
-    def test_admin_profile_is_rejected_with_json_403(self):
-        admin = User.objects.create_user(username="dashboard_admin")
+    def test_active_admin_receives_general_status_without_personal_data(self):
+        admin = User.objects.create_user(
+            username="dashboard_admin",
+            email="dashboard_admin@escola.com",
+            is_staff=True,
+        )
         UserProfile.objects.create(user=admin, role=UserProfile.Role.ADMIN)
+        PreferenceResponse.objects.create(
+            student=admin,
+            base_color="BLACK",
+            related_to_course=True,
+            wants_animal=False,
+            preferred_animal="",
+            preferred_colors=["BLUE"],
+            wants_collar=True,
+            wants_phrase=False,
+            intends_to_buy=True,
+        )
         self.client.force_login(admin)
 
         response = self.get_dashboard()
 
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 200)
         self.assertEqual(
             response.json(),
-            {"error": "Acesso permitido apenas a estudantes ativos."},
+            {
+                "survey_open": False,
+                "voting_open": False,
+                "results_release_authorized": False,
+                "has_preferences": False,
+                "has_voted": False,
+            },
         )
+        admin.refresh_from_db()
+        self.assertTrue(admin.is_staff)
+        self.assertFalse(admin.is_superuser)
 
     def test_inactive_student_session_is_rejected_as_anonymous(self):
         self.student.is_active = False
@@ -476,6 +501,7 @@ class StudentPreferencesApiTests(TestCase):
         self.assertNotIn("database details", response.content.decode())
 
 
+@override_settings(ADMIN_EMAILS=["approved_admin@escola.com"])
 class ApprovedStudentProposalsApiTests(TestCase):
     proposals_url = "/api/election/student/proposals/"
 
@@ -535,18 +561,28 @@ class ApprovedStudentProposalsApiTests(TestCase):
             proposal.pk,
         )
 
-    def test_admin_profile_is_rejected_with_json_403(self):
-        admin = User.objects.create_user(username="approved_proposals_admin")
+    def test_active_admin_can_read_approved_proposals(self):
+        proposal = self.create_proposal(
+            "Proposta aprovada para admin",
+            ShirtProposal.Status.APPROVED,
+        )
+        admin = User.objects.create_user(
+            username="approved_proposals_admin",
+            email="approved_admin@escola.com",
+            is_staff=True,
+        )
         UserProfile.objects.create(user=admin, role=UserProfile.Role.ADMIN)
         self.client.force_login(admin)
 
         response = self.client.get(self.proposals_url)
 
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 200)
         self.assertEqual(
-            response.json(),
-            {"error": "Acesso permitido apenas a estudantes ativos."},
+            [item["id"] for item in response.json()["proposals"]],
+            [proposal.pk],
         )
+        admin.refresh_from_db()
+        self.assertFalse(admin.is_superuser)
 
     def test_pending_and_rejected_proposals_are_not_listed(self):
         self.create_proposal(
@@ -3055,6 +3091,87 @@ class PrivateImageStorageMigrationTests(TestCase):
             ]),
             1,
         )
+
+
+@override_settings(ADMIN_EMAILS=["admin@escola.com"])
+class AdminElectionApiPermissionTests(TestCase):
+    dashboard_url = "/api/election/admin/dashboard/"
+    user_role_url = "/api/election/admin/users/{}/role/"
+    user_status_url = "/api/election/admin/users/{}/status/"
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            username="api_admin",
+            email="admin@escola.com",
+            is_staff=True,
+        )
+        UserProfile.objects.create(user=self.admin, role=UserProfile.Role.ADMIN)
+        self.student = User.objects.create_user(
+            username="api_student",
+            email="student@escola.com",
+        )
+        UserProfile.objects.create(
+            user=self.student,
+            role=UserProfile.Role.STUDENT,
+        )
+
+    def test_admin_can_access_admin_dashboard_without_superuser_status(self):
+        self.client.force_login(self.admin)
+
+        response = self.client.get(self.dashboard_url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["counts"]["admins_total"])
+        self.admin.refresh_from_db()
+        self.assertFalse(self.admin.is_superuser)
+
+    def test_student_and_anonymous_user_cannot_access_admin_dashboard(self):
+        student_response = self.client.get(self.dashboard_url)
+        self.assertEqual(student_response.status_code, 403)
+
+        self.client.force_login(self.student)
+        response = self.client.get(self.dashboard_url)
+        self.assertEqual(response.status_code, 403)
+
+    def test_promoting_a_user_to_admin_does_not_grant_superuser(self):
+        self.client.force_login(self.admin)
+        target = User.objects.create_user(
+            username="promoted_admin",
+            email="promoted@escola.com",
+        )
+        UserProfile.objects.create(user=target, role=UserProfile.Role.STUDENT)
+
+        response = self.client.post(
+            self.user_role_url.format(target.pk),
+            data=json.dumps({"role": UserProfile.Role.ADMIN}),
+            content_type="application/json",
+        )
+
+        target.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(target.profile.role, UserProfile.Role.ADMIN)
+        self.assertTrue(target.is_staff)
+        self.assertFalse(target.is_superuser)
+
+    def test_only_active_admin_can_keep_admin_role_and_status(self):
+        self.client.force_login(self.admin)
+
+        role_response = self.client.post(
+            self.user_role_url.format(self.admin.pk),
+            data=json.dumps({"role": UserProfile.Role.STUDENT}),
+            content_type="application/json",
+        )
+        status_response = self.client.post(
+            self.user_status_url.format(self.admin.pk),
+            data=json.dumps({"is_active": False}),
+            content_type="application/json",
+        )
+
+        self.admin.refresh_from_db()
+        self.assertEqual(role_response.status_code, 400)
+        self.assertEqual(status_response.status_code, 400)
+        self.assertTrue(self.admin.is_active)
+        self.assertEqual(self.admin.profile.role, UserProfile.Role.ADMIN)
 
 
 class StudentElectionActionApiTests(TestCase):

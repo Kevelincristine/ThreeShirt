@@ -3,6 +3,7 @@ import { ConfirmationModal } from "../components/modals/ConfirmationModal";
 import { Alert } from "../components/feedback/Alert";
 import { Loading } from "../components/feedback/Loading";
 import { ShirtCard } from "../components/shirts/ShirtCard";
+import { useAuth } from "../app/AuthContext";
 import {
   ApiError,
   castStudentVote,
@@ -24,6 +25,9 @@ type GalleryState =
   | { status: "error"; message: string };
 
 export function StudentGalleryPage() {
+  const { state: authState } = useAuth();
+  const isAdmin =
+    authState.status === "authenticated" && authState.user.role === "admin";
   const [state, setState] = useState<GalleryState>({ status: "loading" });
   const [selected, setSelected] = useState<StudentProposal | null>(null);
   const [voting, setVoting] = useState(false);
@@ -123,15 +127,21 @@ export function StudentGalleryPage() {
       )}
       {state.status === "ready" && state.proposals.length > 0 && (
         <>
-          {state.dashboard.voting_open && !state.dashboard.has_voted && (
+          {isAdmin && (
+            <Alert variant="info">
+              Visualização administrativa: a participação na votação é restrita
+              a estudantes elegíveis.
+            </Alert>
+          )}
+          {!isAdmin && state.dashboard.voting_open && !state.dashboard.has_voted && (
             <Alert variant="info">
               A votação está aberta. Escolha uma proposta e confirme seu voto.
             </Alert>
           )}
-          {state.dashboard.has_voted && (
+          {!isAdmin && state.dashboard.has_voted && (
             <Alert variant="success">Seu voto já foi registrado.</Alert>
           )}
-          {!state.dashboard.voting_open && !state.dashboard.has_voted && (
+          {!isAdmin && !state.dashboard.voting_open && !state.dashboard.has_voted && (
             <Alert variant="warning">A votação está fechada no momento.</Alert>
           )}
           <div className="shirt-gallery">
@@ -150,7 +160,7 @@ export function StudentGalleryPage() {
                     proposal.has_phrase ? `Frase: ${proposal.phrase_text}` : "",
                   ].filter(Boolean).join(" · ")}
                 />
-                {state.dashboard.voting_open && !state.dashboard.has_voted && (
+                {!isAdmin && state.dashboard.voting_open && !state.dashboard.has_voted && (
                   <button
                     className="button button--primary shirt-gallery__vote"
                     onClick={() => setSelected(proposal)}

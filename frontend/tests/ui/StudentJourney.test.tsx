@@ -2,9 +2,13 @@ import { afterEach, beforeAll, beforeEach, expect, test, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { App } from "../../src/app/App";
 import { AuthProvider } from "../../src/app/AuthContext";
+import { RequireAdmin } from "../../src/app/RequireAdmin";
 import { RequireStudent } from "../../src/app/RequireStudent";
+import { HomePage } from "../../src/pages/HomePage";
 import { StudentGalleryPage } from "../../src/pages/StudentGalleryPage";
+import { StudentDashboardPage } from "../../src/pages/StudentDashboardPage";
 import { StudentPreferencesPage } from "../../src/pages/StudentPreferencesPage";
 import { StudentProposalsPage } from "../../src/pages/StudentProposalsPage";
 import { StudentResultsPage } from "../../src/pages/StudentResultsPage";
@@ -76,6 +80,157 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+});
+
+test("an admin can navigate between the student and admin areas in one session", async () => {
+  const user = userEvent.setup();
+  vi.mocked(getSession).mockResolvedValue({
+    authenticated: true,
+    user: { id: 8, email: "admin@school.test", role: "admin" },
+  });
+
+  render(
+    <MemoryRouter initialEntries={["/"]}>
+      <AuthProvider>
+        <Routes>
+          <Route element={<App />}>
+            <Route element={<HomePage />} index />
+            <Route
+              element={
+                <RequireStudent allowAdmin>
+                  <p>Painel do estudante protegido</p>
+                </RequireStudent>
+              }
+              path="student"
+            />
+            <Route
+              element={
+                <RequireAdmin>
+                  <p>Painel administrativo protegido</p>
+                </RequireAdmin>
+              }
+              path="admin"
+            />
+          </Route>
+        </Routes>
+      </AuthProvider>
+    </MemoryRouter>,
+  );
+
+  await screen.findByRole("link", { name: "Abrir painel administrativo" });
+  await user.click(screen.getByRole("link", { name: "Abrir painel do estudante" }));
+  expect(await screen.findByText("Painel do estudante protegido")).toBeTruthy();
+
+  await user.click(screen.getByRole("link", { name: "Administração" }));
+  expect(await screen.findByText("Painel administrativo protegido")).toBeTruthy();
+  expect(getSession).toHaveBeenCalledTimes(1);
+});
+
+test("an admin is restricted from student participation routes", async () => {
+  vi.mocked(getSession).mockResolvedValue({
+    authenticated: true,
+    user: { id: 8, email: "admin@school.test", role: "admin" },
+  });
+
+  render(
+    <MemoryRouter initialEntries={["/student/preferences"]}>
+      <AuthProvider>
+        <Routes>
+          <Route
+            element={
+              <RequireStudent>
+                <p>Formulário de preferências</p>
+              </RequireStudent>
+            }
+            path="/student/preferences"
+          />
+        </Routes>
+      </AuthProvider>
+    </MemoryRouter>,
+  );
+
+  expect(
+    await screen.findByText("Esta funcionalidade é exclusiva para estudantes elegíveis."),
+  ).toBeTruthy();
+  expect(screen.queryByText("Formulário de preferências")).toBeNull();
+});
+
+test("an admin dashboard shows general election status without participant actions", async () => {
+  vi.mocked(getSession).mockResolvedValue({
+    authenticated: true,
+    user: { id: 8, email: "admin@school.test", role: "admin" },
+  });
+  vi.mocked(getStudentDashboard).mockResolvedValue({
+    ...dashboard,
+    survey_open: true,
+    voting_open: true,
+  });
+
+  render(
+    <MemoryRouter>
+      <AuthProvider>
+        <StudentDashboardPage />
+      </AuthProvider>
+    </MemoryRouter>,
+  );
+
+  expect(await screen.findByText("Pesquisa de preferências")).toBeTruthy();
+  expect(screen.queryByText("Suas preferências")).toBeNull();
+  expect(screen.queryByText("Seu voto")).toBeNull();
+  expect(screen.getByRole("link", { name: "Ver propostas aprovadas" })).toBeTruthy();
+  expect(screen.queryByRole("link", { name: "Responder pesquisa" })).toBeNull();
+});
+
+test("a student cannot enter the admin area", async () => {
+  vi.mocked(getSession).mockResolvedValue({
+    authenticated: true,
+    user: { id: 5, email: "student@school.test", role: "student" },
+  });
+
+  render(
+    <MemoryRouter initialEntries={["/admin"]}>
+      <AuthProvider>
+        <Routes>
+          <Route
+            element={
+              <RequireAdmin>
+                <p>Painel administrativo protegido</p>
+              </RequireAdmin>
+            }
+            path="/admin"
+          />
+        </Routes>
+      </AuthProvider>
+    </MemoryRouter>,
+  );
+
+  expect(await screen.findByText("Área exclusiva para administradores")).toBeTruthy();
+  expect(screen.queryByText("Painel administrativo protegido")).toBeNull();
+});
+
+test("an unauthenticated user is redirected away from the student area", async () => {
+  vi.mocked(getSession).mockResolvedValue({ authenticated: false });
+
+  render(
+    <MemoryRouter initialEntries={["/student"]}>
+      <AuthProvider>
+        <Routes>
+          <Route
+            element={
+              <RequireStudent>
+                <p>Painel protegido</p>
+              </RequireStudent>
+            }
+            path="/student"
+          />
+          <Route element={<p>Entre novamente</p>} path="/login" />
+        </Routes>
+      </AuthProvider>
+    </MemoryRouter>,
+  );
+
+  expect(await screen.findByText("Entre novamente")).toBeTruthy();
+  expect(screen.queryByText("Painel protegido")).toBeNull();
 });
 
 test("preferences show a loading state while the backend response is pending", () => {
@@ -195,6 +350,10 @@ test("proposal history shows each real moderation status and API errors", async 
 
 test("gallery displays approved proposals and asks for confirmation before voting", async () => {
   const user = userEvent.setup();
+  vi.mocked(getSession).mockResolvedValue({
+    authenticated: true,
+    user: { id: 5, email: "student@school.test", role: "student" },
+  });
   vi.mocked(getApprovedStudentProposals).mockResolvedValue([{
     id: 4,
     title: "Design aprovado",
@@ -213,7 +372,11 @@ test("gallery displays approved proposals and asks for confirmation before votin
     .mockResolvedValueOnce({ ...dashboard, voting_open: true, has_voted: true });
   vi.mocked(castStudentVote).mockResolvedValue();
 
-  render(<StudentGalleryPage />);
+  render(
+    <AuthProvider>
+      <StudentGalleryPage />
+    </AuthProvider>,
+  );
   await user.click(await screen.findByRole("button", { name: "Votar nesta proposta" }));
   expect(await screen.findByRole("heading", { name: "Confirmar seu voto" })).toBeTruthy();
   expect(castStudentVote).not.toHaveBeenCalled();
@@ -223,12 +386,56 @@ test("gallery displays approved proposals and asks for confirmation before votin
 });
 
 test("gallery treats an empty approved list as an explicit empty state", async () => {
+  vi.mocked(getSession).mockResolvedValue({
+    authenticated: true,
+    user: { id: 5, email: "student@school.test", role: "student" },
+  });
   vi.mocked(getApprovedStudentProposals).mockResolvedValue([]);
   vi.mocked(getStudentDashboard).mockResolvedValue(dashboard);
 
-  render(<StudentGalleryPage />);
+  render(
+    <AuthProvider>
+      <StudentGalleryPage />
+    </AuthProvider>,
+  );
 
   expect(await screen.findByText("Ainda não há propostas aprovadas para exibir.")).toBeTruthy();
+});
+
+test("admin gallery displays approved designs without offering a vote", async () => {
+  vi.mocked(getSession).mockResolvedValue({
+    authenticated: true,
+    user: { id: 8, email: "admin@school.test", role: "admin" },
+  });
+  vi.mocked(getApprovedStudentProposals).mockResolvedValue([{
+    id: 4,
+    title: "Design aprovado",
+    description: "Aprovado pela equipe.",
+    image_url: "/proposals/4/image/",
+    base_color: "WHITE",
+    related_to_course: true,
+    animal: "",
+    additional_colors: ["BLUE"],
+    has_collar: true,
+    has_phrase: false,
+    phrase_text: "",
+  }]);
+  vi.mocked(getStudentDashboard).mockResolvedValue({
+    ...dashboard,
+    voting_open: true,
+  });
+
+  render(
+    <AuthProvider>
+      <StudentGalleryPage />
+    </AuthProvider>,
+  );
+
+  expect(await screen.findByText("Design aprovado")).toBeTruthy();
+  expect(
+    screen.getByText(/a participação na votação é restrita a estudantes elegíveis/i),
+  ).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Votar nesta proposta" })).toBeNull();
 });
 
 test("results handle backend authorization and no-vote states", async () => {

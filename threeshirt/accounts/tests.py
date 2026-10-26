@@ -549,6 +549,21 @@ class LoginTests(TestCase):
             str(self.user.pk),
         )
 
+    @override_settings(ADMIN_EMAILS=[TEST_EMAIL])
+    def test_admin_login_grants_staff_without_granting_superuser(self):
+        self.create_code()
+
+        response = self.make_request(
+            views.verify_login_code,
+            {"email": TEST_EMAIL, "code": "123456"},
+        )
+
+        self.user.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.user.profile.role, UserProfile.Role.ADMIN)
+        self.assertTrue(self.user.is_staff)
+        self.assertFalse(self.user.is_superuser)
+
     def test_code_cannot_be_reused(self):
         login_code = self.create_code(used_at=timezone.now())
 

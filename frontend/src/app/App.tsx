@@ -49,6 +49,13 @@ export function App() {
               : []),
             ...(state.status === "authenticated" &&
             state.user.role === "admin"
+              ? [
+                  { href: "/student", label: "Painel da eleição" },
+                  { href: "/student/gallery", label: "Propostas aprovadas" },
+                ]
+              : []),
+            ...(state.status === "authenticated" &&
+            state.user.role === "admin"
               ? [{ href: "/admin", label: "Administração" }]
               : []),
             ...(state.status === "authenticated"

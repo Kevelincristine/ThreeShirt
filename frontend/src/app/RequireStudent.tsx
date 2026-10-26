@@ -1,10 +1,16 @@
 import type { ReactNode } from "react";
-import { Link, Navigate } from "react-router-dom";
+import { Navigate } from "react-router-dom";
 import { Alert } from "../components/feedback/Alert";
 import { Loading } from "../components/feedback/Loading";
 import { useAuth } from "./AuthContext";
 
-export function RequireStudent({ children }: { children: ReactNode }) {
+export function RequireStudent({
+  children,
+  allowAdmin = false,
+}: {
+  children: ReactNode;
+  allowAdmin?: boolean;
+}) {
   const { state, refreshSession } = useAuth();
 
   if (state.status === "loading") {
@@ -38,18 +44,14 @@ export function RequireStudent({ children }: { children: ReactNode }) {
     return <Navigate replace to="/login" />;
   }
 
-  if (state.user.role !== "student") {
+  if (state.user.role !== "student" && !allowAdmin) {
     return (
       <section aria-labelledby="student-access-title" className="paper-panel">
         <p className="eyebrow">Acesso restrito</p>
         <h1 id="student-access-title">Área exclusiva para estudantes</h1>
         <Alert variant="warning">
-          Sua conta está autenticada, mas não possui o perfil de estudante
-          necessário para acessar esta área.
+          Esta funcionalidade é exclusiva para estudantes elegíveis.
         </Alert>
-        <Link className="button button--secondary access-retry" to="/">
-          Voltar ao início
-        </Link>
       </section>
     );
   }

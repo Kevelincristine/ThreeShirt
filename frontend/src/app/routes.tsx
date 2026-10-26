@@ -22,7 +22,7 @@ export const router = createBrowserRouter([
       {
         path: "student",
         element: (
-          <RequireStudent>
+          <RequireStudent allowAdmin>
             <StudentDashboardPage />
           </RequireStudent>
         ),
@@ -46,7 +46,7 @@ export const router = createBrowserRouter([
       {
         path: "student/gallery",
         element: (
-          <RequireStudent>
+          <RequireStudent allowAdmin>
             <StudentGalleryPage />
           </RequireStudent>
         ),

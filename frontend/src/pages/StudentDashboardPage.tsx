@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { Alert } from "../components/feedback/Alert";
 import { Loading } from "../components/feedback/Loading";
+import { useAuth } from "../app/AuthContext";
 import { getStudentDashboard } from "../services/api";
 import type { StudentDashboardResponse } from "../types/api";
 
@@ -34,6 +35,9 @@ function DashboardCard({
 }
 
 export function StudentDashboardPage() {
+  const { state: authState } = useAuth();
+  const isAdmin =
+    authState.status === "authenticated" && authState.user.role === "admin";
   const [state, setState] = useState<DashboardState>({ status: "loading" });
   const [retryCount, setRetryCount] = useState(0);
 
@@ -66,8 +70,9 @@ export function StudentDashboardPage() {
         <p className="eyebrow">Caderno da turma</p>
         <h1 id="student-dashboard-title">Painel do estudante</h1>
         <p>
-          Acompanhe por aqui as informações atuais da pesquisa, da votação e
-          da sua participação.
+          {isAdmin
+            ? "Consulte as informações gerais da pesquisa e da votação."
+            : "Acompanhe por aqui as informações atuais da pesquisa, da votação e da sua participação."}
         </p>
       </header>
 
@@ -115,36 +120,48 @@ export function StudentDashboardPage() {
                   : "Ainda não autorizada"
               }
             />
-            <DashboardCard
-              description="Consulta referente à sua conta."
-              title="Suas preferências"
-              value={
-                state.dashboard.has_preferences
-                  ? "Resposta registrada"
-                  : "Sem resposta registrada"
-              }
-            />
-            <DashboardCard
-              description="Consulta referente à sua conta."
-              title="Seu voto"
-              value={
-                state.dashboard.has_voted
-                  ? "Voto registrado"
-                  : "Sem voto registrado"
-              }
-            />
+            {!isAdmin && (
+              <>
+                <DashboardCard
+                  description="Consulta referente à sua conta."
+                  title="Suas preferências"
+                  value={
+                    state.dashboard.has_preferences
+                      ? "Resposta registrada"
+                      : "Sem resposta registrada"
+                  }
+                />
+                <DashboardCard
+                  description="Consulta referente à sua conta."
+                  title="Seu voto"
+                  value={
+                    state.dashboard.has_voted
+                      ? "Voto registrado"
+                      : "Sem voto registrado"
+                  }
+                />
+              </>
+            )}
           </dl>
           <nav aria-label="Etapas da participação" className="student-journey">
-            <Link className="button button--primary" to="/student/preferences">
-              Responder pesquisa
-            </Link>
-            <Link className="button button--secondary" to="/student/proposals">
-              Enviar ou acompanhar propostas
-            </Link>
-            <Link className="button button--secondary" to="/student/gallery">
-              Ver propostas e votar
-            </Link>
-            {state.dashboard.results_release_authorized && (
+            {isAdmin ? (
+              <Link className="button button--secondary" to="/student/gallery">
+                Ver propostas aprovadas
+              </Link>
+            ) : (
+              <>
+                <Link className="button button--primary" to="/student/preferences">
+                  Responder pesquisa
+                </Link>
+                <Link className="button button--secondary" to="/student/proposals">
+                  Enviar ou acompanhar propostas
+                </Link>
+                <Link className="button button--secondary" to="/student/gallery">
+                  Ver propostas e votar
+                </Link>
+              </>
+            )}
+            {!isAdmin && state.dashboard.results_release_authorized && (
               <Link className="button button--secondary" to="/student/results">
                 Consultar resultados
               </Link>

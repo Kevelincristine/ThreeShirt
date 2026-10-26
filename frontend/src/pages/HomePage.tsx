@@ -44,6 +44,12 @@ export function HomePage() {
             <>
               <Link
                 className="button button--primary login-home-link"
+                to="/student"
+              >
+                Abrir painel do estudante
+              </Link>
+              <Link
+                className="button button--primary login-home-link"
                 to="/admin"
               >
                 Abrir painel administrativo

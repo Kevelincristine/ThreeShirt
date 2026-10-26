@@ -510,11 +510,10 @@ def verify_login_code(request):
     )
 
     # Sincroniza as permissões administrativas.
-    if user.is_staff != is_admin or user.is_superuser != is_admin:
+    if user.is_staff != is_admin:
         user.is_staff = is_admin
-        user.is_superuser = is_admin
         _run_with_sqlite_lock_retry(
-            lambda: user.save(update_fields=["is_staff", "is_superuser"])
+            lambda: user.save(update_fields=["is_staff"])
         )
 
     # Inicia a sessão autenticada do Django.

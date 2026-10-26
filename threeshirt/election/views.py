@@ -511,8 +511,7 @@ def admin_user_permission(request, user_id):
     profile.role = target_role
     profile.save(update_fields=["role"])
     user.is_staff = target_role == UserProfile.Role.ADMIN
-    user.is_superuser = target_role == UserProfile.Role.ADMIN
-    user.save(update_fields=["is_staff", "is_superuser"])
+    user.save(update_fields=["is_staff"])
     return JsonResponse({
         "message": "Permissão de usuário atualizada com sucesso.",
         "user": _serialize_user_summary(user),
@@ -630,16 +629,23 @@ def student_dashboard_status(request):
         )
 
     try:
-        preferences = get_preference_response(request.user)
+        is_admin = _is_active_admin_user(request.user)
+        preferences = (
+            None
+            if is_admin
+            else get_preference_response(request.user)
+        )
         settings = ElectionSettings.objects.filter(pk=1).first()
         response = {
             "survey_open": is_survey_open(),
             "voting_open": settings is not None and settings.voting_open,
             "results_release_authorized": is_results_release_authorized(),
             "has_preferences": preferences is not None,
-            "has_voted": Vote.objects.filter(
-                student=request.user,
-            ).exists(),
+            "has_voted": (
+                False
+                if is_admin
+                else Vote.objects.filter(student=request.user).exists()
+            ),
         }
     except PermissionDenied:
         return JsonResponse(
@@ -666,7 +672,13 @@ def approved_student_proposals(request):
         )
 
     try:
-        proposals = list(get_approved_proposals(request.user))
+        proposals = list(
+            ShirtProposal.objects.filter(
+                status=ShirtProposal.Status.APPROVED,
+            ).order_by("-created_at", "-pk")
+            if _is_active_admin_user(request.user)
+            else get_approved_proposals(request.user)
+        )
     except PermissionDenied:
         return JsonResponse(
             {"error": "Acesso permitido apenas a estudantes ativos."},
