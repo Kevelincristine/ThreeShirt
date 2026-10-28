@@ -3,10 +3,14 @@ import { Alert } from "../components/feedback/Alert";
 import { Loading } from "../components/feedback/Loading";
 import {
   ApiError,
+  getStudentDashboard,
   getStudentSubmissions,
   submitStudentProposal,
 } from "../services/api";
-import type { StudentSubmission } from "../types/api";
+import type {
+  StudentDashboardResponse,
+  StudentSubmission,
+} from "../types/api";
 
 const colors = [
   ["RED", "Vermelho"],
@@ -32,8 +36,15 @@ type SubmissionState =
   | { status: "ready"; submissions: StudentSubmission[] }
   | { status: "error"; message: string };
 
+type SubmissionStageState =
+  | { status: "loading" }
+  | { status: "ready"; isOpen: boolean }
+  | { status: "error"; message: string };
+
 export function StudentProposalsPage() {
   const [state, setState] = useState<SubmissionState>({ status: "loading" });
+  const [submissionStage, setSubmissionStage] =
+    useState<SubmissionStageState>({ status: "loading" });
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [baseColor, setBaseColor] = useState<"BLACK" | "WHITE">("BLACK");
@@ -65,9 +76,32 @@ export function StudentProposalsPage() {
     }
   }
 
+  async function loadSubmissionStage(signal?: AbortSignal): Promise<void> {
+    setSubmissionStage({ status: "loading" });
+    try {
+      const dashboard: StudentDashboardResponse = await getStudentDashboard(signal);
+      if (!signal?.aborted) {
+        setSubmissionStage({
+          status: "ready",
+          isOpen: dashboard.proposal_submission_open,
+        });
+      }
+    } catch (reason) {
+      if (!signal?.aborted) {
+        setSubmissionStage({
+          status: "error",
+          message: reason instanceof Error
+            ? reason.message
+            : "Não foi possível verificar se o envio de propostas está aberto.",
+        });
+      }
+    }
+  }
+
   useEffect(() => {
     const controller = new AbortController();
     void load(controller.signal);
+    void loadSubmissionStage(controller.signal);
     return () => controller.abort();
   }, []);
 
@@ -129,7 +163,35 @@ export function StudentProposalsPage() {
         <p>As propostas enviadas ficam pendentes até a revisão administrativa.</p>
       </header>
 
-      <form className="paper-panel student-form" onSubmit={(event) => void submit(event)}>
+      {submissionStage.status === "loading" && (
+        <div className="paper-panel student-page__panel">
+          <Loading label="Verificando se o envio de propostas está aberto..." />
+        </div>
+      )}
+      {submissionStage.status === "error" && (
+        <div className="paper-panel student-page__panel">
+          <Alert variant="error">{submissionStage.message}</Alert>
+          <button
+            className="button button--primary"
+            onClick={() => void loadSubmissionStage()}
+            type="button"
+          >
+            Tentar verificar novamente
+          </button>
+        </div>
+      )}
+      {submissionStage.status === "ready" && !submissionStage.isOpen && (
+        <div className="paper-panel student-page__panel">
+          <Alert variant="warning">
+            O envio de propostas está fechado no momento. Você ainda pode acompanhar suas propostas enviadas abaixo.
+          </Alert>
+        </div>
+      )}
+      <form
+        className="paper-panel student-form"
+        hidden={submissionStage.status !== "ready" || !submissionStage.isOpen}
+        onSubmit={(event) => void submit(event)}
+      >
         {notice && <Alert variant="success">{notice}</Alert>}
         {error && <Alert variant="error">{error}</Alert>}
 

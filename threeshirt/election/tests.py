@@ -137,6 +137,7 @@ class StudentDashboardStatusApiTests(TestCase):
             response.json(),
             {
                 "survey_open": False,
+                "proposal_submission_open": True,
                 "voting_open": False,
                 "results_release_authorized": False,
                 "has_preferences": False,
@@ -216,6 +217,7 @@ class StudentDashboardStatusApiTests(TestCase):
             response.json(),
             {
                 "survey_open": False,
+                "proposal_submission_open": True,
                 "voting_open": False,
                 "results_release_authorized": False,
                 "has_preferences": False,
@@ -269,6 +271,7 @@ class StudentDashboardStatusApiTests(TestCase):
             set(data),
             {
                 "survey_open",
+                "proposal_submission_open",
                 "voting_open",
                 "results_release_authorized",
                 "has_preferences",
@@ -287,6 +290,24 @@ class StudentDashboardStatusApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["survey_open"])
         self.assertFalse(response.json()["voting_open"])
+
+    def test_proposal_submission_status_matches_election_settings(self):
+        self.client.force_login(self.student)
+        settings = ElectionSettings.objects.create(
+            proposal_submission_open=False,
+        )
+
+        closed_response = self.get_dashboard()
+
+        self.assertEqual(closed_response.status_code, 200)
+        self.assertFalse(closed_response.json()["proposal_submission_open"])
+
+        settings.proposal_submission_open = True
+        settings.save(update_fields=["proposal_submission_open"])
+        open_response = self.get_dashboard()
+
+        self.assertEqual(open_response.status_code, 200)
+        self.assertTrue(open_response.json()["proposal_submission_open"])
 
     def test_voting_open_and_survey_closed_status(self):
         ElectionSettings.objects.create(

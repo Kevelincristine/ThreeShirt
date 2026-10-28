@@ -638,6 +638,9 @@ def student_dashboard_status(request):
         settings = ElectionSettings.objects.filter(pk=1).first()
         response = {
             "survey_open": is_survey_open(),
+            "proposal_submission_open": (
+                settings is None or settings.proposal_submission_open is not False
+            ),
             "voting_open": settings is not None and settings.voting_open,
             "results_release_authorized": is_results_release_authorized(),
             "has_preferences": preferences is not None,

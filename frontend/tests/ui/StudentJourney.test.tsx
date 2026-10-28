@@ -46,6 +46,7 @@ vi.mock("../../src/services/api", () => ({
 
 const dashboard = {
   survey_open: true,
+  proposal_submission_open: true,
   voting_open: false,
   results_release_authorized: false,
   has_preferences: false,
@@ -76,6 +77,7 @@ beforeAll(() => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(getStudentDashboard).mockResolvedValue(dashboard);
 });
 
 afterEach(() => {
@@ -307,6 +309,7 @@ test("proposal form sends a multipart proposal and handles an empty history", as
 
   render(<StudentProposalsPage />);
   await screen.findByText("Você ainda não enviou propostas.");
+  expect(await screen.findByRole("button", { name: "Enviar para análise" })).toBeTruthy();
   fireEvent.change(screen.getByLabelText("Título"), {
     target: { value: "Camiseta da turma" },
   });
@@ -328,6 +331,36 @@ test("proposal form sends a multipart proposal and handles an empty history", as
   expect(payload.get("additional_colors")).toBe("[]");
   expect(payload.get("image")).toBe(file);
   expect(await screen.findByText(/foi enviada e aguarda análise/)).toBeTruthy();
+});
+
+test("closed proposal submission hides the form and explains the stage", async () => {
+  vi.mocked(getStudentDashboard).mockResolvedValue({
+    ...dashboard,
+    proposal_submission_open: false,
+  });
+  vi.mocked(getStudentSubmissions).mockResolvedValue([]);
+
+  const { container } = render(<StudentProposalsPage />);
+
+  expect(await screen.findByText(/O envio de propostas está fechado/)).toBeTruthy();
+  expect(container.querySelector("form")?.hidden).toBe(true);
+  expect(screen.getByText("Você ainda não enviou propostas.")).toBeTruthy();
+});
+
+test("proposal form stays hidden when stage status fails to load and can be retried", async () => {
+  vi.mocked(getStudentDashboard)
+    .mockRejectedValueOnce(new Error("Falha ao consultar as etapas."))
+    .mockResolvedValueOnce(dashboard);
+  vi.mocked(getStudentSubmissions).mockResolvedValue([]);
+
+  const { container } = render(<StudentProposalsPage />);
+
+  expect(await screen.findByText("Falha ao consultar as etapas.")).toBeTruthy();
+  expect(container.querySelector("form")?.hidden).toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "Tentar verificar novamente" }));
+
+  expect(await screen.findByRole("button", { name: "Enviar para análise" })).toBeTruthy();
+  expect(container.querySelector("form")?.hidden).toBe(false);
 });
 
 test("proposal history shows each real moderation status and API errors", async () => {

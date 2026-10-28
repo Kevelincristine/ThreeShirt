@@ -198,3 +198,20 @@ test("expired student sessions notify the authentication context", async () => {
     window.removeEventListener("threeshirt:session-expired", handleExpired);
   }
 });
+
+test("student dashboard reads the proposal submission stage from the API", async () => {
+  const restore = setFetch(async () => mockResponse({
+    survey_open: false,
+    proposal_submission_open: false,
+    voting_open: false,
+    results_release_authorized: false,
+    has_preferences: false,
+    has_voted: false,
+  }));
+  try {
+    const dashboard = await api.getStudentDashboard();
+    assert.equal(dashboard.proposal_submission_open, false);
+  } finally {
+    restore();
+  }
+});

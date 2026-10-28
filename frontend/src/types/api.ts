@@ -37,6 +37,7 @@ export type SessionResponse =
 
 export interface StudentDashboardResponse {
   survey_open: boolean;
+  proposal_submission_open: boolean;
   voting_open: boolean;
   results_release_authorized: boolean;
   has_preferences: boolean;

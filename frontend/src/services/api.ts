@@ -101,6 +101,7 @@ function getStudentDashboardResponse(
   if (
     isRecord(data) &&
     typeof data.survey_open === "boolean" &&
+    typeof data.proposal_submission_open === "boolean" &&
     typeof data.voting_open === "boolean" &&
     typeof data.results_release_authorized === "boolean" &&
     typeof data.has_preferences === "boolean" &&
@@ -108,6 +109,7 @@ function getStudentDashboardResponse(
   ) {
     return {
       survey_open: data.survey_open,
+      proposal_submission_open: data.proposal_submission_open,
       voting_open: data.voting_open,
       results_release_authorized: data.results_release_authorized,
       has_preferences: data.has_preferences,
