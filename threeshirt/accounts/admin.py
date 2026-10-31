@@ -16,16 +16,19 @@ class RestrictedAdminSite(admin.AdminSite):
 
     def has_permission(self, request):
         user = request.user
-        allowed_emails = {
+
+        if not user.is_active or not user.is_staff:
+            return False
+
+        authorized_emails = {
             email.strip().lower()
-            for email in settings.ADMIN_EMAILS
+            for email in getattr(settings, "ADMIN_EMAILS", [])
+            if email and email.strip()
         }
 
-        return (
-            user.is_active
-            and user.is_staff
-            and user.email.strip().lower() in allowed_emails
-        )
+        user_email = (user.email or "").strip().lower()
+
+        return user_email in authorized_emails
 
 
 three_shirt_admin = RestrictedAdminSite(name="admin")
@@ -35,11 +38,13 @@ class UserProfileInline(admin.StackedInline):
     model = UserProfile
     can_delete = False
     extra = 0
-def has_change_permission(self, request, obj=None):
-    return True
 
-def get_readonly_fields(self, request, obj=None):
-    return ("user", "full_name", "role")
+    def has_change_permission(self, request, obj=None):
+        return True
+
+    def get_readonly_fields(self, request, obj=None):
+        return ("user", "full_name", "role")
+
 
 class CustomUserAdmin(BaseUserAdmin):
     inlines = (UserProfileInline,)
@@ -52,8 +57,16 @@ three_shirt_admin.register(UserProfile)
 
 
 class EmailLoginCodeAdmin(admin.ModelAdmin):
-    list_display = ("email", "created_at", "expires_at", "used_at", "attempts")
+    list_display = (
+        "email",
+        "created_at",
+        "expires_at",
+        "used_at",
+        "attempts",
+    )
+
     search_fields = ("email",)
+
     readonly_fields = (
         "email",
         "code_hash",

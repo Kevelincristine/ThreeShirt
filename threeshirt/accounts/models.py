@@ -8,7 +8,20 @@ class UserProfile(models.Model):
 
     class Role(models.TextChoices):
         STUDENT = "STUDENT", "Estudante"
+        STUDENT_ADMIN = "STUDENT_ADMIN", "Estudante-administrador"
         ADMIN = "ADMIN", "Administrador"
+
+    # Papéis que podem participar da eleição.
+    STUDENT_ROLES = (
+        Role.STUDENT,
+        Role.STUDENT_ADMIN,
+    )
+
+    # Papéis que podem acessar a administração.
+    ADMIN_ROLES = (
+        Role.ADMIN,
+        Role.STUDENT_ADMIN,
+    )
 
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,
@@ -24,7 +37,7 @@ class UserProfile(models.Model):
     )
 
     role = models.CharField(
-        max_length=10,
+        max_length=13,
         choices=Role.choices,
         default=Role.STUDENT,
     )

@@ -7,7 +7,6 @@ from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import IntegrityError, transaction
 from django.db.models import Count
 
-from accounts.admin import three_shirt_admin
 from accounts.models import UserProfile
 
 from .models import (
@@ -19,8 +18,10 @@ from .models import (
 )
 from .concurrency import run_with_sqlite_lock_retry
 
+
 MIN_COMPARABLE_CRITERIA = 3
 COMPATIBILITY_TIE_QUANTUM = Decimal("0.01")
+
 SHIRT_PROPOSAL_FIELDS = {
     "title",
     "description",
@@ -33,6 +34,7 @@ SHIRT_PROPOSAL_FIELDS = {
     "has_phrase",
     "phrase_text",
 }
+
 PREFERENCE_FIELDS = {
     "base_color",
     "related_to_course",
@@ -43,6 +45,7 @@ PREFERENCE_FIELDS = {
     "wants_phrase",
     "intends_to_buy",
 }
+
 BOOLEAN_PREFERENCE_FIELDS = {
     "related_to_course",
     "wants_animal",
@@ -53,6 +56,8 @@ BOOLEAN_PREFERENCE_FIELDS = {
 
 
 def _require_student_user(user):
+    """Ensure that the authenticated user can participate as a student."""
+
     if (
         not getattr(user, "is_authenticated", False)
         or not getattr(user, "is_active", False)
@@ -66,7 +71,7 @@ def _require_student_user(user):
             "O usuário precisa ter um perfil de estudante."
         ) from exc
 
-    if profile.role != UserProfile.Role.STUDENT:
+    if profile.role not in UserProfile.STUDENT_ROLES:
         raise PermissionDenied(
             "Somente estudantes podem responder à pesquisa."
         )
@@ -74,7 +79,9 @@ def _require_student_user(user):
 
 def cast_vote(user, proposal_id):
     """Register one vote for an approved proposal during an open election."""
+
     _require_student_user(user)
+
     return run_with_sqlite_lock_retry(
         lambda: _cast_vote_once(user, proposal_id)
     )
@@ -88,6 +95,7 @@ def _cast_vote_once(user, proposal_id):
             .filter(pk=1)
             .first()
         )
+
         if settings is None or not settings.voting_open:
             raise ValidationError({"voting": "A votação está fechada."})
 
@@ -97,10 +105,12 @@ def _cast_vote_once(user, proposal_id):
             .filter(pk=proposal_id)
             .first()
         )
+
         if proposal is None:
             raise ValidationError({
                 "proposal": "A proposta selecionada não existe."
             })
+
         if proposal.status != ShirtProposal.Status.APPROVED:
             raise ValidationError({
                 "proposal": "Só é possível votar em propostas aprovadas."
@@ -122,6 +132,7 @@ def _cast_vote_once(user, proposal_id):
                 raise ValidationError({
                     "vote": "Você já registrou seu voto."
                 }) from exc
+
             raise
 
     return vote
@@ -140,12 +151,14 @@ def _has_valid_colors(value):
 
 def save_preference_response(user, data):
     """Create or update the authenticated student's open-survey response."""
+
     _require_student_user(user)
 
     if not isinstance(data, Mapping):
         raise ValidationError("As respostas devem ser enviadas como um objeto.")
 
     unknown_fields = set(data) - PREFERENCE_FIELDS
+
     if unknown_fields:
         errors = {
             str(field): "Este campo não pode ser enviado."
@@ -160,6 +173,7 @@ def save_preference_response(user, data):
             .filter(pk=1)
             .first()
         )
+
         if settings is None or not settings.survey_open:
             raise ValidationError(
                 {"survey": "A pesquisa de preferências está fechada."}
@@ -171,6 +185,7 @@ def save_preference_response(user, data):
             .filter(student=user)
             .first()
         )
+
         if response is None:
             response = PreferenceResponse(student=user)
 
@@ -182,8 +197,10 @@ def save_preference_response(user, data):
             for field in BOOLEAN_PREFERENCE_FIELDS
             if type(getattr(response, field)) is not bool
         }
+
         if not isinstance(response.preferred_animal, str):
             invalid_types["preferred_animal"] = "Informe um texto."
+
         if not isinstance(response.preferred_colors, list) or any(
             not isinstance(color, str)
             for color in response.preferred_colors
@@ -191,6 +208,7 @@ def save_preference_response(user, data):
             invalid_types["preferred_colors"] = (
                 "As cores devem ser uma lista de textos."
             )
+
         if invalid_types:
             raise ValidationError(invalid_types)
 
@@ -202,17 +220,21 @@ def save_preference_response(user, data):
 
 def submit_shirt_proposal(user, data):
     """Validate and submit a proposal as pending for the current student."""
+
     _require_student_user(user)
+
     if not isinstance(data, Mapping):
         raise ValidationError("Os dados da proposta devem ser um objeto.")
 
     settings = ElectionSettings.objects.filter(pk=1).first()
+
     if settings is not None and settings.proposal_submission_open is False:
         raise ValidationError({
             "proposal_submission": "O envio de propostas está fechado."
         })
 
     unknown_fields = set(data) - SHIRT_PROPOSAL_FIELDS
+
     if unknown_fields:
         raise ValidationError({
             str(field): "Este campo não pode ser enviado."
@@ -223,23 +245,29 @@ def submit_shirt_proposal(user, data):
         author=user,
         status=ShirtProposal.Status.PENDING,
     )
+
     for field, value in data.items():
         setattr(proposal, field, value)
 
     proposal.full_clean()
     proposal.save()
+
     return proposal
 
 
 def get_preference_response(user):
     """Return only the authenticated student's response, if one exists."""
+
     _require_student_user(user)
+
     return PreferenceResponse.objects.filter(student=user).first()
 
 
 def is_survey_open():
     """Return whether the singleton preference survey is open."""
+
     settings = ElectionSettings.objects.filter(pk=1).first()
+
     return settings is not None and settings.survey_open
 
 
@@ -248,11 +276,13 @@ def calculate_compatibility(
     proposal: ShirtProposal,
 ) -> tuple[float | None, int]:
     """Return the individual compatibility percentage and comparable criteria."""
+
     similarities = []
 
     valid_base_colors = {
         value for value, _label in PreferenceResponse.BaseColor.choices
     }
+
     if (
         preferences.base_color in valid_base_colors
         and proposal.base_color in valid_base_colors
@@ -266,12 +296,18 @@ def calculate_compatibility(
         (preferences.wants_collar, proposal.has_collar),
         (preferences.wants_phrase, proposal.has_phrase),
     )
+
     for preference_value, proposal_value in boolean_pairs:
-        if isinstance(preference_value, bool) and isinstance(proposal_value, bool):
-            similarities.append(float(preference_value == proposal_value))
+        if isinstance(preference_value, bool) and isinstance(
+            proposal_value, bool
+        ):
+            similarities.append(
+                float(preference_value == proposal_value)
+            )
 
     preferred_colors = preferences.preferred_colors
     proposal_colors = proposal.additional_colors
+
     if (
         _has_valid_colors(preferred_colors)
         and preferred_colors
@@ -280,12 +316,14 @@ def calculate_compatibility(
         preferred_color_set = set(preferred_colors)
         proposal_color_set = set(proposal_colors)
         union = preferred_color_set | proposal_color_set
+
         similarities.append(
             len(preferred_color_set & proposal_color_set) / len(union)
         )
 
     preferred_animal = preferences.preferred_animal
     proposal_animal = proposal.animal
+
     if (
         preferences.wants_animal is True
         and isinstance(preferred_animal, str)
@@ -299,6 +337,7 @@ def calculate_compatibility(
                 == proposal_animal.strip().casefold()
             )
         )
+
     elif (
         preferences.wants_animal is False
         and isinstance(preferred_animal, str)
@@ -309,29 +348,40 @@ def calculate_compatibility(
         similarities.append(0.0)
 
     comparable_criteria = len(similarities)
+
     if comparable_criteria < MIN_COMPARABLE_CRITERIA:
         return None, comparable_criteria
 
-    score = round(sum(similarities) / comparable_criteria * 100, 2)
+    score = round(
+        sum(similarities) / comparable_criteria * 100,
+        2,
+    )
+
     return score, comparable_criteria
 
 
 def get_approved_proposal_compatibilities(user):
     """Return individual scores for approved proposals and this student."""
+
     _require_student_user(user)
+
     preferences = get_preference_response(user)
+
     if preferences is None:
         return []
 
     results = []
+
     proposals = ShirtProposal.objects.filter(
         status=ShirtProposal.Status.APPROVED,
     )
+
     for proposal in proposals:
         score, comparable_criteria = calculate_compatibility(
             preferences,
             proposal,
         )
+
         results.append((proposal, score, comparable_criteria))
 
     return results
@@ -339,7 +389,9 @@ def get_approved_proposal_compatibilities(user):
 
 def get_pending_proposal_descriptions(user):
     """Return pending proposal text without image names or file paths."""
+
     _require_student_user(user)
+
     return list(
         ShirtProposal.objects
         .filter(status=ShirtProposal.Status.PENDING)
@@ -349,7 +401,9 @@ def get_pending_proposal_descriptions(user):
 
 def get_approved_proposals(user):
     """Return approved proposals to an active student, newest first."""
+
     _require_student_user(user)
+
     return ShirtProposal.objects.filter(
         status=ShirtProposal.Status.APPROVED,
     ).order_by("-created_at", "-pk")
@@ -361,16 +415,19 @@ def get_vote_tally():
     Votes for proposals that are no longer approved remain in the database
     but are excluded from the valid-vote denominator and winner calculation.
     """
+
     proposal_counts = list(
         ShirtProposal.objects
         .values("pk", "title", "status")
         .annotate(vote_count=Count("votes"))
         .order_by("pk")
     )
+
     approved_proposals = [
         proposal for proposal in proposal_counts
         if proposal["status"] == ShirtProposal.Status.APPROVED
     ]
+
     excluded_proposals = [
         {
             "proposal_id": proposal["pk"],
@@ -384,17 +441,20 @@ def get_vote_tally():
             and proposal["vote_count"]
         )
     ]
+
     total_votes = sum(
         proposal["vote_count"] for proposal in approved_proposals
     )
 
     results = []
+
     for proposal in approved_proposals:
         percentage = (
             Decimal(proposal["vote_count"] * 100) / Decimal(total_votes)
             if total_votes
             else None
         )
+
         results.append({
             "proposal_id": proposal["pk"],
             "title": proposal["title"],
@@ -406,6 +466,7 @@ def get_vote_tally():
         (result["vote_count"] for result in results),
         default=0,
     )
+
     winners = (
         [
             result for result in results
@@ -414,6 +475,7 @@ def get_vote_tally():
         if total_votes
         else []
     )
+
     return {
         "status": "complete" if total_votes else "no_votes",
         "total_votes": total_votes,
@@ -433,27 +495,32 @@ def get_compatibility_tally():
     Compatibility ties are determined by rounding averages to two decimal
     places with ROUND_HALF_UP, matching the individual score precision.
     """
+
     proposals = list(
         ShirtProposal.objects
         .filter(status=ShirtProposal.Status.APPROVED)
         .order_by("pk")
     )
+
     responses = list(
         PreferenceResponse.objects
         .filter(
             student__is_active=True,
-            student__profile__role=UserProfile.Role.STUDENT,
+            student__profile__role__in=UserProfile.STUDENT_ROLES,
         )
     )
 
     results = []
+
     for proposal in proposals:
         scores = []
+
         for response in responses:
             score, _comparable_criteria = calculate_compatibility(
                 response,
                 proposal,
             )
+
             if score is not None:
                 scores.append(Decimal(str(score)))
 
@@ -462,6 +529,7 @@ def get_compatibility_tally():
             if scores
             else None
         )
+
         results.append({
             "proposal_id": proposal.pk,
             "title": proposal.title,
@@ -474,6 +542,7 @@ def get_compatibility_tally():
         result for result in results
         if result["average_compatibility"] is not None
     ]
+
     highest_comparison_score = max(
         (
             result["average_compatibility"].quantize(
@@ -484,6 +553,7 @@ def get_compatibility_tally():
         ),
         default=None,
     )
+
     winners = [
         result for result in available_results
         if result["average_compatibility"].quantize(
@@ -503,5 +573,7 @@ def get_compatibility_tally():
 
 def is_results_release_authorized():
     """Return whether an authorized administrator enabled result release."""
+
     settings = ElectionSettings.objects.filter(pk=1).first()
+
     return settings is not None and settings.results_release_authorized

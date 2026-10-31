@@ -24,11 +24,13 @@ from django.views.decorators.http import require_GET, require_POST
 
 from .models import EmailLoginCode, LoginRequestRateBucket, UserProfile
 
+
 LOGIN_CODE_MAX_ATTEMPTS = 5
 LOGIN_REQUEST_WINDOW = timedelta(minutes=1)
 LOGIN_REQUEST_ACCOUNT_LIMIT = 3
 LOGIN_REQUEST_SOURCE_LIMIT = 10
 SQLITE_RATE_LIMIT_RETRIES = 20
+
 logger = logging.getLogger(__name__)
 
 
@@ -43,6 +45,7 @@ def initialize_csrf(request):
 def session_status(request):
     """Returns the authenticated user's public identity, if available."""
     user = request.user
+
     if not user.is_authenticated:
         return JsonResponse({"authenticated": False})
 
@@ -56,8 +59,10 @@ def session_status(request):
 
     role = {
         UserProfile.Role.STUDENT: "student",
+        UserProfile.Role.STUDENT_ADMIN: "student_admin",
         UserProfile.Role.ADMIN: "admin",
     }.get(profile.role)
+
     if role is None:
         return JsonResponse(
             {"error": "Perfil de usuário inválido."},
@@ -78,6 +83,7 @@ def session_status(request):
 def logout_user(request):
     """Ends the current Django session."""
     auth_logout(request)
+
     return JsonResponse({
         "authenticated": False,
         "message": "Sessão encerrada com sucesso.",
@@ -89,13 +95,16 @@ def _run_with_sqlite_lock_retry(operation):
     for attempt in range(SQLITE_RATE_LIMIT_RETRIES):
         try:
             return operation()
+
         except OperationalError as exc:
             error_code = getattr(exc.__cause__, "sqlite_errorcode", None)
+
             primary_code = (
                 error_code & 0xFF
                 if error_code is not None
                 else None
             )
+
             is_sqlite_lock = (
                 connection.vendor == "sqlite"
                 and primary_code in (
@@ -103,8 +112,13 @@ def _run_with_sqlite_lock_retry(operation):
                     sqlite3.SQLITE_LOCKED,
                 )
             )
-            if not is_sqlite_lock or attempt == SQLITE_RATE_LIMIT_RETRIES - 1:
+
+            if (
+                not is_sqlite_lock
+                or attempt == SQLITE_RATE_LIMIT_RETRIES - 1
+            ):
                 raise
+
             time.sleep(
                 min(0.005 * (2 ** attempt), 0.1)
                 + secrets.randbelow(10) / 1000
@@ -151,6 +165,7 @@ def _consume_login_code(login_code, now):
 
 def _rate_limit_digest(kind, identifier):
     message = f"threeshirt:login-request:{kind}:{identifier}".encode()
+
     return hmac.new(
         settings.SECRET_KEY.encode(),
         message,
@@ -161,6 +176,7 @@ def _rate_limit_digest(kind, identifier):
 def _request_source(request):
     """Use the address supplied by the WSGI server, never forwarded headers."""
     remote_addr = request.META.get("REMOTE_ADDR", "")
+
     try:
         address = ipaddress.ip_address(remote_addr)
     except (TypeError, ValueError):
@@ -168,6 +184,7 @@ def _request_source(request):
 
     if isinstance(address, ipaddress.IPv6Address):
         return str(address.ipv4_mapped or address)
+
     return str(address)
 
 
@@ -181,15 +198,19 @@ def _record_login_request(email, source, now):
 def _record_login_request_once(email, source, now):
     """Apply one rate-limit update inside a database transaction."""
     source_digest = _rate_limit_digest("source", source)
+
     account_digest = (
         _rate_limit_digest("account", email)
         if email is not None
         else None
     )
+
     digests = sorted(
-        digest for digest in (account_digest, source_digest)
+        digest
+        for digest in (account_digest, source_digest)
         if digest is not None
     )
+
     cutoff = now - LOGIN_REQUEST_WINDOW
     cutoff_timestamp = int(cutoff.timestamp() * 1_000_000)
 
@@ -199,7 +220,9 @@ def _record_login_request_once(email, source, now):
         ).delete()
 
         for digest in digests:
-            LoginRequestRateBucket.objects.get_or_create(key_digest=digest)
+            LoginRequestRateBucket.objects.get_or_create(
+                key_digest=digest,
+            )
 
         buckets = {
             bucket.key_digest: bucket
@@ -210,6 +233,7 @@ def _record_login_request_once(email, source, now):
                 .order_by("key_digest")
             )
         }
+
         recent = {
             digest: [
                 timestamp
@@ -218,7 +242,9 @@ def _record_login_request_once(email, source, now):
             ]
             for digest, bucket in buckets.items()
         }
+
         source_requests = recent[source_digest]
+
         if len(source_requests) >= LOGIN_REQUEST_SOURCE_LIMIT:
             return False
 
@@ -226,9 +252,11 @@ def _record_login_request_once(email, source, now):
             account_digest is not None
             and len(recent[account_digest]) >= LOGIN_REQUEST_ACCOUNT_LIMIT
         )
+
         timestamp = int(now.timestamp() * 1_000_000)
 
         source_requests.append(timestamp)
+
         LoginRequestRateBucket.objects.filter(
             key_digest=source_digest,
         ).update(
@@ -238,6 +266,7 @@ def _record_login_request_once(email, source, now):
 
         if account_digest is not None and not account_limited:
             recent[account_digest].append(timestamp)
+
             LoginRequestRateBucket.objects.filter(
                 key_digest=account_digest,
             ).update(
@@ -257,10 +286,16 @@ def _activate_login_code(email, pending_code):
         LoginRequestRateBucket.objects.select_for_update().get(
             key_digest=account_digest,
         )
+
         EmailLoginCode.objects.filter(
             email=email,
             used_at__isnull=True,
-        ).exclude(pk=pending_code.pk).update(used_at=now)
+        ).exclude(
+            pk=pending_code.pk,
+        ).update(
+            used_at=now,
+        )
+
         activated = EmailLoginCode.objects.filter(
             pk=pending_code.pk,
             used_at__isnull=False,
@@ -268,8 +303,11 @@ def _activate_login_code(email, pending_code):
             used_at=None,
             expires_at=now + timedelta(minutes=10),
         )
+
         if activated != 1:
-            raise RuntimeError("O código de acesso pendente não foi ativado.")
+            raise RuntimeError(
+                "O código de acesso pendente não foi ativado."
+            )
 
 
 @require_POST
@@ -279,9 +317,13 @@ def request_login_code(request):
     email = request.POST.get("email", "").strip().lower()
 
     def response(state, message):
-        return JsonResponse({"state": state, "message": message})
+        return JsonResponse({
+            "state": state,
+            "message": message,
+        })
 
     valid_email = True
+
     try:
         validate_email(email)
     except ValidationError:
@@ -291,8 +333,10 @@ def request_login_code(request):
         address.strip().lower()
         for address in settings.AUTHORIZED_LOGIN_EMAILS
     }
+
     is_authorized = valid_email and email in allowed_emails
     rate_limit_email = email if is_authorized else None
+
     within_rate_limit = _record_login_request(
         rate_limit_email,
         _request_source(request),
@@ -304,12 +348,14 @@ def request_login_code(request):
             "invalid_email",
             "Digite um endereço de e-mail válido.",
         )
+
     if not is_authorized:
         return response(
             "unauthorized",
             "Este e-mail não está autorizado a acessar o ThreeShirt. "
             "Utilize seu e-mail escolar autorizado.",
         )
+
     if not within_rate_limit:
         return response(
             "rate_limited",
@@ -318,6 +364,7 @@ def request_login_code(request):
         )
 
     User = get_user_model()
+
     try:
         has_active_account = _run_with_sqlite_lock_retry(
             lambda: User.objects.filter(
@@ -325,11 +372,13 @@ def request_login_code(request):
                 is_active=True,
             ).exists()
         )
+
     except Exception as exc:
         logger.error(
             "Falha ao verificar elegibilidade para código de acesso (%s).",
             type(exc).__name__,
         )
+
         return response(
             "send_failed",
             "Não foi possível processar a solicitação. Tente novamente.",
@@ -344,6 +393,7 @@ def request_login_code(request):
     try:
         code = f"{secrets.randbelow(1_000_000):06d}"
         now = timezone.now()
+
         pending_code = _run_with_sqlite_lock_retry(
             lambda: EmailLoginCode.objects.create(
                 email=email,
@@ -352,11 +402,13 @@ def request_login_code(request):
                 used_at=now,
             )
         )
+
     except Exception as exc:
         logger.error(
             "Falha ao preparar código de acesso (%s).",
             type(exc).__name__,
         )
+
         return response(
             "send_failed",
             "Não foi possível enviar o código. Tente novamente.",
@@ -374,11 +426,13 @@ def request_login_code(request):
             recipient_list=[email],
             fail_silently=False,
         )
+
     except Exception as exc:
         logger.error(
             "Resultado do envio do código de acesso não confirmado (%s).",
             type(exc).__name__,
         )
+
         return response(
             "send_failed",
             "Não foi possível enviar o código. Tente novamente.",
@@ -386,6 +440,7 @@ def request_login_code(request):
 
     if sent_count != 1:
         logger.error("O envio do código de acesso não foi confirmado.")
+
         return response(
             "send_failed",
             "Não foi possível enviar o código. Tente novamente.",
@@ -395,11 +450,14 @@ def request_login_code(request):
         _run_with_sqlite_lock_retry(
             lambda: _activate_login_code(email, pending_code)
         )
+
     except Exception as exc:
         logger.error(
-            "E-mail do código enviado, mas ativação no banco não confirmada (%s).",
+            "E-mail do código enviado, mas ativação no banco não confirmada "
+            "(%s).",
             type(exc).__name__,
         )
+
         return response(
             "send_failed",
             "Não foi possível concluir o envio. Tente novamente.",
@@ -434,7 +492,10 @@ def verify_login_code(request):
 
     login_code = (
         EmailLoginCode.objects
-        .filter(email=email, used_at__isnull=True)
+        .filter(
+            email=email,
+            used_at__isnull=True,
+        )
         .order_by("-created_at")
         .first()
     )
@@ -447,10 +508,10 @@ def verify_login_code(request):
     # Rejeita códigos expirados.
     if login_code.expires_at <= now:
         _mark_login_code_used(login_code, now)
+
         return JsonResponse(invalid_response, status=400)
 
-    # Reserve the attempt with a conditional database update so concurrent
-    # requests cannot exceed the limit.
+    # Reserva uma tentativa de validação de forma atômica.
     if not _reserve_login_attempt(login_code, now):
         EmailLoginCode.objects.filter(
             pk=login_code.pk,
@@ -458,7 +519,10 @@ def verify_login_code(request):
         ).filter(
             Q(expires_at__lte=now)
             | Q(attempts__gte=LOGIN_CODE_MAX_ATTEMPTS)
-        ).update(used_at=now)
+        ).update(
+            used_at=now,
+        )
+
         return JsonResponse(invalid_response, status=400)
 
     if not check_password(code, login_code.code_hash):
@@ -472,52 +536,66 @@ def verify_login_code(request):
 
     if email not in allowed_emails:
         _mark_login_code_used(login_code, now)
+
         return JsonResponse(invalid_response, status=400)
 
     # Localiza a conta existente no Django.
     User = get_user_model()
+
     user = _run_with_sqlite_lock_retry(
-        lambda: User.objects.filter(email__iexact=email).first()
+        lambda: User.objects.filter(
+            email__iexact=email,
+        ).first()
     )
 
     if user is None or not user.is_active:
         _mark_login_code_used(login_code, now)
+
         return JsonResponse(invalid_response, status=400)
 
-    # Only one concurrent request can consume the still-valid code.
+    # Apenas uma solicitação concorrente pode consumir o código.
     if not _consume_login_code(login_code, timezone.now()):
         return JsonResponse(invalid_response, status=400)
 
-    # Identifica os administradores autorizados.
+    # Lista usada somente para configurar o primeiro administrador
+    # quando a conta ainda não possui um perfil.
     admin_emails = {
         address.strip().lower()
         for address in settings.ADMIN_EMAILS
     }
-    is_admin = email in admin_emails
 
-    # Cria ou atualiza o perfil do usuário.
-    profile, _ = _run_with_sqlite_lock_retry(
-        lambda: UserProfile.objects.get_or_create(user=user)
-    )
-
-    profile.role = (
+    initial_role = (
         UserProfile.Role.ADMIN
-        if is_admin
+        if email in admin_emails
         else UserProfile.Role.STUDENT
     )
-    _run_with_sqlite_lock_retry(
-        lambda: profile.save(update_fields=["role"])
+
+    # Perfis existentes preservam o papel já salvo no banco.
+    profile, _ = _run_with_sqlite_lock_retry(
+        lambda: UserProfile.objects.get_or_create(
+            user=user,
+            defaults={"role": initial_role},
+        )
     )
 
-    # Sincroniza as permissões administrativas.
-    if user.is_staff != is_admin:
-        user.is_staff = is_admin
+    # A permissão administrativa passa a depender do papel persistido.
+    # STUDENT_ADMIN também recebe acesso administrativo.
+    should_be_staff = (
+        user.is_superuser
+        or profile.role in UserProfile.ADMIN_ROLES
+    )
+
+    if user.is_staff != should_be_staff:
+        user.is_staff = should_be_staff
+
         _run_with_sqlite_lock_retry(
             lambda: user.save(update_fields=["is_staff"])
         )
 
     # Inicia a sessão autenticada do Django.
-    _run_with_sqlite_lock_retry(lambda: login(request, user))
+    _run_with_sqlite_lock_retry(
+        lambda: login(request, user)
+    )
 
     return JsonResponse({
         "message": "Login realizado com sucesso."
