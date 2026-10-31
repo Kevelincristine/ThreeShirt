@@ -14,7 +14,7 @@ export interface LoginCodeRequestResponse extends ApiMessageResponse {
   state: LoginCodeRequestState;
 }
 
-export type SessionRole = "student" | "admin";
+export type SessionRole = "student" | "student_admin" | "admin";
 
 export interface SessionUser {
   id: number;
@@ -163,7 +163,7 @@ export interface AdminUser {
   id: number;
   email: string;
   full_name: string;
-  role: "STUDENT" | "ADMIN";
+  role: "STUDENT" | "STUDENT_ADMIN" | "ADMIN";
   is_active: boolean;
   is_staff: boolean;
 }

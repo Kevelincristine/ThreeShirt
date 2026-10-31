@@ -578,20 +578,6 @@ def verify_login_code(request):
         )
     )
 
-    # A permissão administrativa passa a depender do papel persistido.
-    # STUDENT_ADMIN também recebe acesso administrativo.
-    should_be_staff = (
-        user.is_superuser
-        or profile.role in UserProfile.ADMIN_ROLES
-    )
-
-    if user.is_staff != should_be_staff:
-        user.is_staff = should_be_staff
-
-        _run_with_sqlite_lock_retry(
-            lambda: user.save(update_fields=["is_staff"])
-        )
-
     # Inicia a sessão autenticada do Django.
     _run_with_sqlite_lock_retry(
         lambda: login(request, user)

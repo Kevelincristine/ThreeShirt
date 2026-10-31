@@ -5,6 +5,17 @@ import { useAuth } from "../app/AuthContext";
 
 export function HomePage() {
   const { state, refreshSession } = useAuth();
+  const isStudent =
+    state.status === "authenticated" &&
+    (state.user.role === "student" || state.user.role === "student_admin");
+  const isAdmin =
+    state.status === "authenticated" &&
+    (state.user.role === "admin" || state.user.role === "student_admin");
+  const roleLabel = state.status !== "authenticated"
+    ? ""
+    : state.user.role === "student_admin"
+      ? "estudante e administrador"
+      : isStudent ? "estudante" : "administrador";
 
   return (
     <section aria-labelledby="home-title" className="paper-panel">
@@ -27,27 +38,18 @@ export function HomePage() {
       {state.status === "authenticated" && (
         <>
           <p>
-            Boas-vindas! Você está autenticado como{" "}
-            {state.user.role === "student"
-              ? "estudante"
-              : "administrador"}
-            .
+            Boas-vindas! Você está autenticado como {roleLabel}.
           </p>
-          {state.user.role === "student" ? (
+          {(isStudent || isAdmin) && (
             <Link
               className="button button--primary login-home-link"
               to="/student"
             >
               Abrir painel do estudante
             </Link>
-          ) : (
+          )}
+          {isAdmin && (
             <>
-              <Link
-                className="button button--primary login-home-link"
-                to="/student"
-              >
-                Abrir painel do estudante
-              </Link>
               <Link
                 className="button button--primary login-home-link"
                 to="/admin"

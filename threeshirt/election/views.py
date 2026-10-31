@@ -20,7 +20,6 @@ from django.views.decorators.http import (
     require_POST,
 )
 
-from accounts.admin import three_shirt_admin
 from accounts.models import UserProfile
 
 from .models import ElectionSettings, PreferenceResponse, ShirtProposal, Vote
@@ -79,26 +78,14 @@ def _is_active_admin_user(user):
     ):
         return False
     try:
-        return (
-            three_shirt_admin.has_permission(
-                type("_RequestProxy", (), {"user": user})()
-            )
-            and user.profile.role == UserProfile.Role.ADMIN
-        )
+        return user.profile.role in UserProfile.ADMIN_ROLES
     except UserProfile.DoesNotExist:
         return False
 
 
 def _require_admin_user(request):
-    if not request.user.is_authenticated:
-        raise PermissionDenied("Autenticação necessária.")
-    if not three_shirt_admin.has_permission(request):
+    if not _is_active_admin_user(request.user):
         raise PermissionDenied("Permissão administrativa necessária.")
-    try:
-        if request.user.profile.role != UserProfile.Role.ADMIN:
-            raise PermissionDenied("Acesso administrativo restrito.")
-    except UserProfile.DoesNotExist as exc:
-        raise PermissionDenied("Perfil administrativo ausente.") from exc
     return request.user
 
 
@@ -111,11 +98,7 @@ def _serialize_user_summary(user):
         "id": user.pk,
         "email": user.email,
         "full_name": (profile.full_name if profile else ""),
-        "role": (
-            UserProfile.Role.ADMIN
-            if profile and profile.role == UserProfile.Role.ADMIN
-            else UserProfile.Role.STUDENT
-        ),
+        "role": profile.role if profile else UserProfile.Role.STUDENT,
         "is_active": bool(user.is_active),
         "is_staff": bool(user.is_staff),
     }
@@ -135,11 +118,12 @@ def admin_dashboard(request):
     settings = ElectionSettings.objects.filter(pk=1).first()
     active_students = User.objects.filter(
         is_active=True,
-        profile__role=UserProfile.Role.STUDENT,
+        profile__role__in=UserProfile.STUDENT_ROLES,
     ).count()
     total_active_users = User.objects.filter(is_active=True).count()
     responses = PreferenceResponse.objects.filter(
         student__is_active=True,
+        student__profile__role__in=UserProfile.STUDENT_ROLES,
     ).values_list("student_id", flat=True).distinct().count()
     proposal_counts = {
         status: ShirtProposal.objects.filter(status=status).count()
@@ -170,7 +154,7 @@ def admin_dashboard(request):
             "votes_cast": Vote.objects.count(),
             "admins_total": User.objects.filter(
                 is_active=True,
-                profile__role=UserProfile.Role.ADMIN,
+                profile__role__in=UserProfile.ADMIN_ROLES,
             ).count(),
         },
         "progress": {
@@ -283,6 +267,16 @@ def admin_review_proposal(request, proposal_id):
 
     try:
         with transaction.atomic():
+            settings = (
+                ElectionSettings.objects
+                .select_for_update()
+                .filter(pk=1)
+                .first()
+            )
+            if settings is not None and settings.voting_open:
+                raise ValidationError({
+                    "voting": "As propostas não podem ser revisadas durante a votação."
+                })
             proposal = (
                 ShirtProposal.objects
                 .select_for_update()
@@ -305,7 +299,10 @@ def admin_review_proposal(request, proposal_id):
                 message = "Proposta rejeitada com sucesso."
             proposal.reviewed_by = request.user
             proposal.reviewed_at = timezone.now()
-            proposal.full_clean()
+            try:
+                proposal.full_clean()
+            finally:
+                proposal.image.close()
             proposal.save()
     except ShirtProposal.DoesNotExist:
         return JsonResponse({"error": "Proposta não encontrada."}, status=404)
@@ -361,14 +358,24 @@ def admin_stage_controls(request):
     stage = payload.get("stage")
     action = payload.get("action")
     if stage is None:
-        for candidate in ("survey", "proposal_submission", "voting"):
+        for candidate in (
+            "survey",
+            "proposal_submission",
+            "voting",
+            "results_release",
+        ):
             if candidate in payload:
                 stage = candidate
                 action = payload[candidate]
                 break
-    if stage not in {"survey", "proposal_submission", "voting"}:
+    if stage not in {
+        "survey",
+        "proposal_submission",
+        "voting",
+        "results_release",
+    }:
         return JsonResponse(
-            {"error": "Etapa inválida. Use survey, proposal_submission ou voting."},
+            {"error": "Etapa inválida. Use survey, proposal_submission, voting ou results_release."},
             status=400,
         )
     if action not in {"open", "close"}:
@@ -385,14 +392,26 @@ def admin_stage_controls(request):
                 .filter(pk=1)
                 .first()
             ) or settings
+            changed = False
             if stage == "survey":
-                settings.survey_open = action == "open"
-                if not settings.survey_open:
-                    settings.survey_closed_at = timezone.now()
+                next_value = action == "open"
+                if settings.survey_open != next_value:
+                    settings.survey_open = next_value
+                    changed = True
+                    if not next_value:
+                        settings.survey_closed_at = timezone.now()
             elif stage == "proposal_submission":
-                settings.proposal_submission_open = action == "open"
+                next_value = action == "open"
+                if settings.proposal_submission_open != next_value:
+                    settings.proposal_submission_open = next_value
+                    changed = True
+            elif stage == "results_release":
+                next_value = action == "open"
+                if settings.results_release_authorized != next_value:
+                    settings.results_release_authorized = next_value
+                    changed = True
             elif stage == "voting":
-                if action == "open":
+                if action == "open" and not settings.voting_open:
                     if Vote.objects.exists():
                         raise ValidationError({
                             "voting": "A votação não pode ser reaberta após o registro de votos."
@@ -401,14 +420,21 @@ def admin_stage_controls(request):
                         raise ValidationError({
                             "survey": "Feche a pesquisa antes de abrir a votação."
                         })
+                    if settings.proposal_submission_open is not False:
+                        raise ValidationError({
+                            "proposal_submission": "Feche o envio de propostas antes de abrir a votação."
+                        })
                     settings.voting_open = True
                     settings.voting_started_at = timezone.now()
                     settings.voting_ended_at = None
-                else:
+                    changed = True
+                elif action == "close" and settings.voting_open:
                     settings.voting_open = False
                     settings.voting_ended_at = timezone.now()
-            settings.full_clean()
-            settings.save()
+                    changed = True
+            if changed:
+                settings.full_clean()
+                settings.save()
     except ValidationError as exc:
         return _validation_error_response(exc)
     except DatabaseError:
@@ -423,6 +449,7 @@ def admin_stage_controls(request):
         "survey_open": settings.survey_open,
         "proposal_submission_open": settings.proposal_submission_open is not False,
         "voting_open": settings.voting_open,
+        "results_release_authorized": settings.results_release_authorized,
     })
 
 
@@ -439,21 +466,7 @@ def admin_users(request):
 
     users = User.objects.select_related("profile").order_by("email")
     return JsonResponse({
-        "users": [
-            {
-                "id": user.pk,
-                "email": user.email,
-                "full_name": user.profile.full_name if hasattr(user, "profile") else "",
-                "role": (
-                    UserProfile.Role.ADMIN
-                    if getattr(user, "profile", None) and user.profile.role == UserProfile.Role.ADMIN
-                    else UserProfile.Role.STUDENT
-                ),
-                "is_active": user.is_active,
-                "is_staff": user.is_staff,
-            }
-            for user in users
-        ]
+        "users": [_serialize_user_summary(user) for user in users]
     })
 
 
@@ -484,9 +497,13 @@ def admin_user_permission(request, user_id):
     target_role = payload.get("role")
     if target_role is None and payload.get("is_admin") is not None:
         target_role = UserProfile.Role.ADMIN if payload.get("is_admin") else UserProfile.Role.STUDENT
-    if target_role not in {UserProfile.Role.ADMIN, UserProfile.Role.STUDENT}:
+    if target_role not in {
+        UserProfile.Role.ADMIN,
+        UserProfile.Role.STUDENT_ADMIN,
+        UserProfile.Role.STUDENT,
+    }:
         return JsonResponse(
-            {"error": "Role inválida. Use 'ADMIN' ou 'STUDENT'."},
+            {"error": "Role inválida. Use 'STUDENT', 'STUDENT_ADMIN' ou 'ADMIN'."},
             status=400,
         )
 
@@ -496,22 +513,31 @@ def admin_user_permission(request, user_id):
             status=400,
         )
 
-    if target_role == UserProfile.Role.STUDENT:
-        active_admins = User.objects.filter(
+    try:
+        profile = user.profile
+        current_role = profile.role
+    except UserProfile.DoesNotExist:
+        profile = None
+        current_role = None
+    if (
+        user.is_active
+        and current_role in UserProfile.ADMIN_ROLES
+        and target_role not in UserProfile.ADMIN_ROLES
+    ):
+        remaining_admins = User.objects.filter(
             is_active=True,
-            profile__role=UserProfile.Role.ADMIN,
-        ).exclude(pk=request.user.pk).count()
-        if active_admins == 0:
+            profile__role__in=UserProfile.ADMIN_ROLES,
+        ).exclude(pk=user.pk).count()
+        if remaining_admins == 0:
             return JsonResponse(
                 {"error": "O sistema precisa manter pelo menos um administrador ativo."},
                 status=400,
             )
 
-    profile, _ = UserProfile.objects.get_or_create(user=user)
+    if profile is None:
+        profile, _ = UserProfile.objects.get_or_create(user=user)
     profile.role = target_role
     profile.save(update_fields=["role"])
-    user.is_staff = target_role == UserProfile.Role.ADMIN
-    user.save(update_fields=["is_staff"])
     return JsonResponse({
         "message": "Permissão de usuário atualizada com sucesso.",
         "user": _serialize_user_summary(user),
@@ -558,19 +584,28 @@ def admin_user_status(request, user_id):
             {"error": "Você não pode desativar a própria conta."},
             status=400,
         )
-    if getattr(user.profile, "role", None) == UserProfile.Role.ADMIN and not payload["is_active"]:
+    try:
+        current_role = user.profile.role
+    except UserProfile.DoesNotExist:
+        current_role = None
+    if (
+        user.is_active
+        and current_role in UserProfile.ADMIN_ROLES
+        and not payload["is_active"]
+    ):
         remaining_admins = User.objects.filter(
             is_active=True,
-            profile__role=UserProfile.Role.ADMIN,
-        ).exclude(pk=user.pk).exclude(pk=request.user.pk).count()
-        if remaining_admins < 1:
+            profile__role__in=UserProfile.ADMIN_ROLES,
+        ).exclude(pk=user.pk).count()
+        if remaining_admins == 0:
             return JsonResponse(
                 {"error": "Não é possível deixar o sistema sem administradores ativos."},
                 status=400,
             )
 
-    user.is_active = payload["is_active"]
-    user.save(update_fields=["is_active"])
+    if user.is_active != payload["is_active"]:
+        user.is_active = payload["is_active"]
+        user.save(update_fields=["is_active"])
     return JsonResponse({
         "message": "Status do usuário atualizado com sucesso.",
         "user": _serialize_user_summary(user),
@@ -591,10 +626,11 @@ def admin_progress(request):
     settings = ElectionSettings.objects.filter(pk=1).first()
     active_students = User.objects.filter(
         is_active=True,
-        profile__role=UserProfile.Role.STUDENT,
+        profile__role__in=UserProfile.STUDENT_ROLES,
     ).count()
     preferences_count = PreferenceResponse.objects.filter(
         student__is_active=True,
+        student__profile__role__in=UserProfile.STUDENT_ROLES,
     ).values("student_id").distinct().count()
     proposal_counts = {
         status: ShirtProposal.objects.filter(status=status).count()
@@ -629,11 +665,14 @@ def student_dashboard_status(request):
         )
 
     try:
+        is_student = _is_authorized_student(request.user)
         is_admin = _is_active_admin_user(request.user)
+        if not is_student and not is_admin:
+            raise PermissionDenied("Acesso permitido apenas a estudantes ativos.")
         preferences = (
-            None
-            if is_admin
-            else get_preference_response(request.user)
+            get_preference_response(request.user)
+            if is_student
+            else None
         )
         settings = ElectionSettings.objects.filter(pk=1).first()
         response = {
@@ -645,9 +684,9 @@ def student_dashboard_status(request):
             "results_release_authorized": is_results_release_authorized(),
             "has_preferences": preferences is not None,
             "has_voted": (
-                False
-                if is_admin
-                else Vote.objects.filter(student=request.user).exists()
+                Vote.objects.filter(student=request.user).exists()
+                if is_student
+                else False
             ),
         }
     except PermissionDenied:
@@ -952,17 +991,20 @@ def _is_authorized_student(user):
         return False
 
     try:
-        return user.profile.role == UserProfile.Role.STUDENT
+        return user.profile.role in UserProfile.STUDENT_ROLES
     except UserProfile.DoesNotExist:
         return False
 
 
 def _is_authorized_admin(request):
-    if not three_shirt_admin.has_permission(request):
+    if (
+        not getattr(request.user, "is_authenticated", False)
+        or not getattr(request.user, "is_active", False)
+    ):
         return False
 
     try:
-        return request.user.profile.role == UserProfile.Role.ADMIN
+        return request.user.profile.role in UserProfile.ADMIN_ROLES
     except UserProfile.DoesNotExist:
         return False
 

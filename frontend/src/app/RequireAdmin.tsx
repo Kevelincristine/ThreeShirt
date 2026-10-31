@@ -38,7 +38,7 @@ export function RequireAdmin({ children }: { children: ReactNode }) {
     return <Navigate replace to="/login" />;
   }
 
-  if (state.user.role !== "admin") {
+  if (state.user.role !== "admin" && state.user.role !== "student_admin") {
     return (
       <section aria-labelledby="admin-access-title" className="paper-panel">
         <p className="eyebrow">Acesso restrito</p>

@@ -1234,6 +1234,7 @@ class ElectionSettingsAdminTests(TestCase):
             self.model_admin.get_fields(request),
             (
                 "survey_open",
+                "proposal_submission_open",
                 "voting_open",
                 "results_release_authorized",
             ),
@@ -1244,6 +1245,7 @@ class ElectionSettingsAdminTests(TestCase):
         form_class = self.model_admin.get_form(request)
         open_form = form_class(data={
             "survey_open": False,
+            "proposal_submission_open": False,
             "voting_open": True,
             "results_release_authorized": False,
         })
@@ -1264,6 +1266,7 @@ class ElectionSettingsAdminTests(TestCase):
         close_form = form_class(
             data={
                 "survey_open": False,
+                "proposal_submission_open": False,
                 "voting_open": False,
                 "results_release_authorized": False,
             },
@@ -1281,9 +1284,30 @@ class ElectionSettingsAdminTests(TestCase):
         self.assertFalse(settings.voting_open)
         self.assertIsNotNone(settings.voting_ended_at)
 
+    def test_django_admin_rejects_voting_while_proposals_are_open(self):
+        settings = ElectionSettings.objects.create(
+            survey_open=False,
+            proposal_submission_open=True,
+        )
+        request = self.make_request(self.authorized_admin)
+        form_class = self.model_admin.get_form(request)
+        form = form_class(
+            data={
+                "survey_open": False,
+                "proposal_submission_open": True,
+                "voting_open": True,
+                "results_release_authorized": False,
+            },
+            instance=settings,
+        )
+
+        self.assertFalse(form.is_valid())
+        self.assertIn("__all__", form.errors)
+
     def test_admin_can_reopen_voting_when_no_votes_exist(self):
         settings = ElectionSettings.objects.create(
             voting_open=False,
+            proposal_submission_open=False,
             voting_started_at=timezone.now() - timedelta(days=2),
             voting_ended_at=timezone.now() - timedelta(days=1),
         )
@@ -1291,6 +1315,7 @@ class ElectionSettingsAdminTests(TestCase):
         form_class = self.model_admin.get_form(request)
         form = form_class(data={
             "survey_open": False,
+            "proposal_submission_open": False,
             "voting_open": True,
             "results_release_authorized": False,
         }, instance=settings)
@@ -1309,6 +1334,7 @@ class ElectionSettingsAdminTests(TestCase):
         previous_end = timezone.now() - timedelta(days=1)
         settings = ElectionSettings.objects.create(
             voting_open=False,
+            proposal_submission_open=False,
             voting_started_at=previous_start,
             voting_ended_at=previous_end,
         )
@@ -1316,6 +1342,7 @@ class ElectionSettingsAdminTests(TestCase):
         form_class = self.model_admin.get_form(request)
         form = form_class(data={
             "survey_open": False,
+            "proposal_submission_open": False,
             "voting_open": True,
             "results_release_authorized": False,
         }, instance=settings)
@@ -1355,6 +1382,7 @@ class ElectionSettingsAdminTests(TestCase):
 
         fresh_form = form_class(data={
             "survey_open": False,
+            "proposal_submission_open": False,
             "voting_open": True,
             "results_release_authorized": False,
         }, instance=settings)
@@ -1364,6 +1392,7 @@ class ElectionSettingsAdminTests(TestCase):
     def test_admin_controls_results_release_without_changing_voting_state(self):
         settings = ElectionSettings.objects.create(
             voting_open=True,
+            proposal_submission_open=False,
             voting_started_at=timezone.now(),
         )
         request = self.make_request(self.authorized_admin)
@@ -1375,6 +1404,7 @@ class ElectionSettingsAdminTests(TestCase):
         form = form_class(
             data={
                 "survey_open": False,
+                "proposal_submission_open": False,
                 "voting_open": True,
                 "results_release_authorized": True,
             },
@@ -1393,6 +1423,7 @@ class ElectionSettingsAdminTests(TestCase):
         form = form_class(
             data={
                 "survey_open": False,
+                "proposal_submission_open": False,
                 "voting_open": True,
                 "results_release_authorized": False,
             },
@@ -2883,6 +2914,25 @@ class ProposalImageAccessTests(TestCase):
 
         self.assertEqual(response.status_code, 403)
 
+    def test_student_admin_can_view_pending_image_without_django_admin_access(self):
+        proposal = self.create_proposal()
+        hybrid = User.objects.create_user(
+            username="image_hybrid_admin",
+            email="hybrid-image@escola.com",
+            is_staff=False,
+        )
+        UserProfile.objects.create(
+            user=hybrid,
+            role=UserProfile.Role.STUDENT_ADMIN,
+        )
+        self.client.force_login(hybrid)
+
+        response = self.client.get(self.image_url(proposal))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "image/png")
+        response.close()
+
     def test_unauthorized_staff_cannot_view_pending_image(self):
         proposal = self.create_proposal()
         unauthorized_staff = User.objects.create_user(
@@ -3153,8 +3203,12 @@ class AdminElectionApiPermissionTests(TestCase):
         self.client.force_login(self.student)
         response = self.client.get(self.dashboard_url)
         self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            self.client.get("/api/election/admin/proposals/").status_code,
+            403,
+        )
 
-    def test_promoting_a_user_to_admin_does_not_grant_superuser(self):
+    def test_promoting_a_user_does_not_grant_django_admin_access(self):
         self.client.force_login(self.admin)
         target = User.objects.create_user(
             username="promoted_admin",
@@ -3171,8 +3225,76 @@ class AdminElectionApiPermissionTests(TestCase):
         target.refresh_from_db()
         self.assertEqual(response.status_code, 200)
         self.assertEqual(target.profile.role, UserProfile.Role.ADMIN)
-        self.assertTrue(target.is_staff)
+        self.assertFalse(target.is_staff)
         self.assertFalse(target.is_superuser)
+
+    def test_user_management_round_trips_all_application_roles(self):
+        self.client.force_login(self.admin)
+        target = User.objects.create_user(
+            username="role_round_trip",
+            email="roles@escola.com",
+            is_staff=False,
+        )
+        UserProfile.objects.create(
+            user=target,
+            role=UserProfile.Role.STUDENT,
+        )
+
+        for role in (
+            UserProfile.Role.STUDENT_ADMIN,
+            UserProfile.Role.ADMIN,
+            UserProfile.Role.STUDENT,
+        ):
+            with self.subTest(role=role):
+                response = self.client.post(
+                    self.user_role_url.format(target.pk),
+                    data=json.dumps({"role": role}),
+                    content_type="application/json",
+                )
+                target.refresh_from_db()
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["user"]["role"], role)
+                self.assertEqual(target.profile.role, role)
+                self.assertFalse(target.is_staff)
+
+    def test_student_admin_accesses_admin_api_without_django_admin_permissions(self):
+        hybrid = User.objects.create_user(
+            username="hybrid_api_admin",
+            email="hybrid@escola.com",
+            is_staff=False,
+        )
+        UserProfile.objects.create(
+            user=hybrid,
+            role=UserProfile.Role.STUDENT_ADMIN,
+        )
+        self.client.force_login(hybrid)
+
+        dashboard = self.client.get(self.dashboard_url)
+        users_response = self.client.get("/api/election/admin/users/")
+        hybrid_user = next(
+            item
+            for item in users_response.json()["users"]
+            if item["id"] == hybrid.pk
+        )
+
+        self.assertEqual(dashboard.status_code, 200)
+        self.assertEqual(users_response.status_code, 200)
+        self.assertEqual(hybrid_user["role"], UserProfile.Role.STUDENT_ADMIN)
+        self.assertFalse(hybrid_user["is_staff"])
+
+    def test_admin_counts_include_student_admins_as_both_roles(self):
+        hybrid = User.objects.create_user(username="hybrid_count")
+        UserProfile.objects.create(
+            user=hybrid,
+            role=UserProfile.Role.STUDENT_ADMIN,
+        )
+        self.client.force_login(self.admin)
+
+        response = self.client.get(self.dashboard_url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["counts"]["students_total"], 2)
+        self.assertEqual(response.json()["counts"]["admins_total"], 2)
 
     def test_only_active_admin_can_keep_admin_role_and_status(self):
         self.client.force_login(self.admin)
@@ -3193,6 +3315,185 @@ class AdminElectionApiPermissionTests(TestCase):
         self.assertEqual(status_response.status_code, 400)
         self.assertTrue(self.admin.is_active)
         self.assertEqual(self.admin.profile.role, UserProfile.Role.ADMIN)
+
+    def test_last_student_admin_cannot_be_demoted_or_deactivated(self):
+        self.admin.profile.role = UserProfile.Role.STUDENT
+        self.admin.profile.save(update_fields=["role"])
+        hybrid = User.objects.create_user(username="last_hybrid_admin")
+        UserProfile.objects.create(
+            user=hybrid,
+            role=UserProfile.Role.STUDENT_ADMIN,
+        )
+        self.client.force_login(self.student)
+
+        with patch("election.views._require_admin_user"):
+            role_response = self.client.post(
+                self.user_role_url.format(hybrid.pk),
+                data=json.dumps({"role": UserProfile.Role.STUDENT}),
+                content_type="application/json",
+            )
+            status_response = self.client.post(
+                self.user_status_url.format(hybrid.pk),
+                data=json.dumps({"is_active": False}),
+                content_type="application/json",
+            )
+
+        hybrid.refresh_from_db()
+        self.assertEqual(role_response.status_code, 400)
+        self.assertEqual(status_response.status_code, 400)
+        self.assertEqual(hybrid.profile.role, UserProfile.Role.STUDENT_ADMIN)
+        self.assertTrue(hybrid.is_active)
+
+
+@override_settings(ADMIN_EMAILS=["api_admin@escola.com"])
+class AdminStageControlsApiTests(TestCase):
+    stages_url = "/api/election/admin/stages/"
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            username="stage_api_admin",
+            email="api_admin@escola.com",
+            is_staff=False,
+        )
+        UserProfile.objects.create(
+            user=self.admin,
+            role=UserProfile.Role.ADMIN,
+        )
+        self.client.force_login(self.admin)
+
+    def update_stage(self, stage, action):
+        return self.client.post(
+            self.stages_url,
+            data=json.dumps({"stage": stage, "action": action}),
+            content_type="application/json",
+        )
+
+    def test_voting_requires_closed_proposal_submission_and_is_idempotent(self):
+        settings = ElectionSettings.objects.create(
+            survey_open=False,
+            proposal_submission_open=True,
+        )
+
+        rejected = self.update_stage("voting", "open")
+        self.assertEqual(rejected.status_code, 400)
+        self.assertIn("proposal_submission", rejected.json()["fields"])
+        settings.refresh_from_db()
+        self.assertFalse(settings.voting_open)
+
+        self.assertEqual(
+            self.update_stage("proposal_submission", "close").status_code,
+            200,
+        )
+        opened = self.update_stage("voting", "open")
+        self.assertEqual(opened.status_code, 200, opened.json())
+        settings.refresh_from_db()
+        started_at = settings.voting_started_at
+        updated_at = settings.updated_at
+
+        self.assertEqual(self.update_stage("voting", "open").status_code, 200)
+        settings.refresh_from_db()
+        self.assertEqual(settings.voting_started_at, started_at)
+        self.assertEqual(settings.updated_at, updated_at)
+
+        self.assertEqual(self.update_stage("voting", "close").status_code, 200)
+        settings.refresh_from_db()
+        ended_at = settings.voting_ended_at
+        updated_at = settings.updated_at
+        self.assertEqual(self.update_stage("voting", "close").status_code, 200)
+        settings.refresh_from_db()
+        self.assertEqual(settings.voting_ended_at, ended_at)
+        self.assertEqual(settings.updated_at, updated_at)
+
+    def test_results_release_control_matches_student_results_access(self):
+        ElectionSettings.objects.create(
+            survey_open=False,
+            proposal_submission_open=False,
+            voting_open=False,
+        )
+        student = User.objects.create_user(username="release_api_student")
+        UserProfile.objects.create(
+            user=student,
+            role=UserProfile.Role.STUDENT,
+        )
+
+        opened = self.update_stage("results_release", "open")
+        self.assertEqual(opened.status_code, 200)
+        self.assertTrue(opened.json()["results_release_authorized"])
+        self.client.force_login(student)
+        self.assertEqual(
+            self.client.get("/api/election/student/results/").status_code,
+            200,
+        )
+
+        self.client.force_login(self.admin)
+        closed = self.update_stage("results_release", "close")
+        self.assertEqual(closed.status_code, 200)
+        self.assertFalse(closed.json()["results_release_authorized"])
+        self.client.force_login(student)
+        self.assertEqual(
+            self.client.get("/api/election/student/results/").status_code,
+            403,
+        )
+
+
+@override_settings(ADMIN_EMAILS=["api_admin@escola.com"])
+class AdminProposalReviewApiTests(TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        settings_override = override_settings(
+            PRIVATE_MEDIA_ROOT=Path(self.temp_dir.name),
+        )
+        settings_override.enable()
+        self.addCleanup(settings_override.disable)
+        self.admin = User.objects.create_user(
+            username="review_api_hybrid",
+            email="hybrid_review@escola.com",
+            is_staff=False,
+        )
+        UserProfile.objects.create(
+            user=self.admin,
+            role=UserProfile.Role.STUDENT_ADMIN,
+        )
+        self.author = User.objects.create_user(username="review_api_author")
+        UserProfile.objects.create(
+            user=self.author,
+            role=UserProfile.Role.STUDENT,
+        )
+        self.proposal = submit_shirt_proposal(
+            self.author,
+            make_proposal_data(),
+        )
+        self.client.force_login(self.admin)
+
+    def review(self):
+        return self.client.post(
+            f"/api/election/admin/proposals/{self.proposal.pk}/review/",
+            data=json.dumps({"decision": "approve"}),
+            content_type="application/json",
+        )
+
+    def test_hybrid_can_review_but_review_is_blocked_during_voting(self):
+        ElectionSettings.objects.create(
+            survey_open=False,
+            proposal_submission_open=False,
+            voting_open=True,
+            voting_started_at=timezone.now(),
+        )
+
+        response = self.review()
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("voting", response.json()["fields"])
+        self.proposal.refresh_from_db()
+        self.assertEqual(self.proposal.status, ShirtProposal.Status.PENDING)
+
+        ElectionSettings.objects.filter(pk=1).update(voting_open=False)
+        response = self.review()
+        self.assertEqual(response.status_code, 200)
+        self.proposal.refresh_from_db()
+        self.assertEqual(self.proposal.status, ShirtProposal.Status.APPROVED)
+        self.assertEqual(self.proposal.reviewed_by, self.admin)
 
 
 class StudentElectionActionApiTests(TestCase):
@@ -3480,6 +3781,70 @@ class StudentElectionActionApiTests(TestCase):
         self.assertEqual(response.json()["status"], "no_votes")
         self.assertEqual(response.json()["total_votes"], 0)
         self.assertEqual(response.json()["winners"], [])
+
+    def test_student_admin_can_complete_student_participation_flow(self):
+        hybrid = User.objects.create_user(
+            username="hybrid_participant",
+            email="hybrid_participant@escola.com",
+        )
+        UserProfile.objects.create(
+            user=hybrid,
+            role=UserProfile.Role.STUDENT_ADMIN,
+        )
+        ElectionSettings.objects.create(
+            survey_open=True,
+            proposal_submission_open=True,
+        )
+        self.client.force_login(hybrid)
+
+        preferences = self.client.post(
+            self.preferences_url,
+            data=json.dumps(self.preference_data()),
+            content_type="application/json",
+        )
+        self.assertEqual(preferences.status_code, 200)
+
+        with tempfile.TemporaryDirectory() as temp_dir, override_settings(
+            PRIVATE_MEDIA_ROOT=Path(temp_dir),
+        ):
+            submission = self.client.post(
+                self.submissions_url,
+                self.submission_data(),
+            )
+        self.assertEqual(submission.status_code, 201)
+        self.assertTrue(
+            ShirtProposal.objects.filter(
+                author=hybrid,
+                status=ShirtProposal.Status.PENDING,
+            ).exists()
+        )
+
+        approved = self.create_proposal()
+        approved_gallery = self.client.get("/api/election/student/proposals/")
+        self.assertEqual(approved_gallery.status_code, 200)
+        self.assertEqual(
+            [item["id"] for item in approved_gallery.json()["proposals"]],
+            [approved.pk],
+        )
+        settings = ElectionSettings.objects.get(pk=1)
+        settings.survey_open = False
+        settings.proposal_submission_open = False
+        settings.voting_open = True
+        settings.voting_started_at = timezone.now()
+        settings.save()
+        vote = self.client.post(
+            self.vote_url,
+            data=json.dumps({"proposal_id": approved.pk}),
+            content_type="application/json",
+        )
+        self.assertEqual(vote.status_code, 200)
+
+        settings.voting_open = False
+        settings.results_release_authorized = True
+        settings.save()
+        results = self.client.get(self.results_url)
+        self.assertEqual(results.status_code, 200)
+        self.assertEqual(results.json()["total_votes"], 1)
 
     def test_student_participation_journey_across_election_endpoints(self):
         with tempfile.TemporaryDirectory() as temp_dir, override_settings(

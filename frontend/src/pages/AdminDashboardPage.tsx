@@ -13,6 +13,12 @@ import {
 } from "../services/api";
 import type { AdminDashboardResponse, AdminProposal, AdminUser } from "../types/api";
 
+const roleLabels: Record<AdminUser["role"], string> = {
+  STUDENT: "Estudante",
+  STUDENT_ADMIN: "Estudante e administrador",
+  ADMIN: "Administrador",
+};
+
 function formatPercent(value: number | null): string {
   if (value == null) return "—";
   return `${value.toFixed(1)}%`;
@@ -100,7 +106,10 @@ export function AdminDashboardPage() {
     }
   }
 
-  async function handleStageToggle(stage: "survey" | "proposal_submission" | "voting", action: "open" | "close") {
+  async function handleStageToggle(
+    stage: "survey" | "proposal_submission" | "voting" | "results_release",
+    action: "open" | "close",
+  ) {
     if (pendingAction) return;
     const actionLabel = action === "open" ? "abrir" : "encerrar";
     const stageLabel =
@@ -108,7 +117,7 @@ export function AdminDashboardPage() {
         ? "pesquisa"
         : stage === "proposal_submission"
           ? "envio de propostas"
-          : "votação";
+          : stage === "voting" ? "votação" : "divulgação dos resultados";
     if (!window.confirm(`Confirmar ${actionLabel} a ${stageLabel}?`)) return;
 
     setPendingAction(`stage:${stage}:${action}`);
@@ -125,10 +134,10 @@ export function AdminDashboardPage() {
     }
   }
 
-  async function handleUserRole(userId: number, role: "ADMIN" | "STUDENT") {
+  async function handleUserRole(userId: number, role: AdminUser["role"]) {
     if (pendingAction) return;
     const result = window.confirm(
-      role === "ADMIN" ? "Conceder acesso administrativo a este usuário?" : "Remover acesso administrativo deste usuário?",
+      `Alterar o papel deste usuário para ${roleLabels[role]}?`,
     );
     if (!result) return;
 
@@ -217,6 +226,7 @@ export function AdminDashboardPage() {
             <div><dt>Pesquisa</dt><dd>{stages.survey_open ? "Aberta" : "Fechada"}</dd></div>
             <div><dt>Envio</dt><dd>{stages.proposal_submission_open ? "Aberto" : "Fechado"}</dd></div>
             <div><dt>Votação</dt><dd>{stages.voting_open ? "Aberta" : "Fechada"}</dd></div>
+            <div><dt>Resultados</dt><dd>{stages.results_release_authorized ? "Liberados" : "Bloqueados"}</dd></div>
           </dl>
         </article>
         <article className="admin-card">
@@ -249,6 +259,9 @@ export function AdminDashboardPage() {
             </button>
             <button className="button button--secondary" type="button" disabled={Boolean(pendingAction)} onClick={() => void handleStageToggle("voting", stages.voting_open ? "close" : "open")}>
               {stages.voting_open ? "Encerrar votação" : "Abrir votação"}
+            </button>
+            <button className="button button--secondary" type="button" disabled={Boolean(pendingAction)} onClick={() => void handleStageToggle("results_release", stages.results_release_authorized ? "close" : "open")}>
+              {stages.results_release_authorized ? "Bloquear resultados" : "Liberar resultados"}
             </button>
           </div>
         </article>
@@ -312,18 +325,24 @@ export function AdminDashboardPage() {
             <article key={user.id} className="admin-item admin-item--compact">
               <div className="admin-item__meta">
                 <strong>{user.full_name || user.email}</strong>
-                <span>{user.role}</span>
+                <span>{roleLabels[user.role]}</span>
               </div>
               <p>{user.email}</p>
+              <p>Conta {user.is_active ? "ativa" : "inativa"}</p>
               <div className="admin-actions admin-actions--inline">
-                <button
-                  className="button button--secondary"
-                  type="button"
-                  disabled={Boolean(pendingAction)}
-                  onClick={() => void handleUserRole(user.id, user.role === "ADMIN" ? "STUDENT" : "ADMIN")}
-                >
-                  {user.role === "ADMIN" ? "Remover admin" : "Tornar admin"}
-                </button>
+                {(
+                  ["STUDENT", "STUDENT_ADMIN", "ADMIN"] as const
+                ).filter((role) => role !== user.role).map((role) => (
+                  <button
+                    className="button button--secondary"
+                    key={role}
+                    type="button"
+                    disabled={Boolean(pendingAction)}
+                    onClick={() => void handleUserRole(user.id, role)}
+                  >
+                    {`Definir: ${roleLabels[role]}`}
+                  </button>
+                ))}
                 <button
                   className="button button--secondary"
                   type="button"

@@ -215,3 +215,73 @@ test("student dashboard reads the proposal submission stage from the API", async
     restore();
   }
 });
+
+test("session parsing preserves student, student administrator, and admin roles", async () => {
+  for (const role of ["student", "student_admin", "admin"]) {
+    const restore = setFetch(async () => mockResponse({
+      authenticated: true,
+      user: { id: 21, email: `${role}@school.test`, role },
+    }));
+    try {
+      const session = await api.getSession();
+      assert.equal(session.authenticated, true);
+      assert.equal(session.user.role, role);
+    } finally {
+      restore();
+    }
+  }
+});
+
+test("admin API preserves hybrid roles and accepts results release controls", async () => {
+  const calls = [];
+  const restore = setFetch(async (url, init) => {
+    calls.push({ url: String(url), init });
+    if (String(url).endsWith("/users/")) {
+      return mockResponse({
+        users: [{
+          id: 32,
+          email: "hybrid@school.test",
+          full_name: "Estudante Admin",
+          role: "STUDENT_ADMIN",
+          is_active: true,
+          is_staff: false,
+        }],
+      });
+    }
+    return mockResponse({ message: "Atualizado." });
+  });
+  try {
+    const users = await api.getAdminUsers();
+    assert.equal(users[0].role, "STUDENT_ADMIN");
+    await api.updateAdminUserRole(32, "STUDENT_ADMIN");
+    await api.updateAdminStage("results_release", "open");
+    assert.deepEqual(JSON.parse(calls[1].init.body), { role: "STUDENT_ADMIN" });
+    assert.deepEqual(JSON.parse(calls[2].init.body), {
+      stage: "results_release",
+      action: "open",
+    });
+  } finally {
+    restore();
+  }
+});
+
+test("API errors include backend field validation messages", async () => {
+  const restore = setFetch(async () => mockResponse({
+    error: "Verifique os dados enviados.",
+    fields: {
+      title: ["Este campo é obrigatório."],
+      image: ["Formato inválido."],
+    },
+  }, 400));
+  try {
+    await assert.rejects(
+      api.castStudentVote(12),
+      (error) =>
+        error instanceof api.ApiError &&
+        error.message.includes("title: Este campo é obrigatório.") &&
+        error.message.includes("image: Formato inválido."),
+    );
+  } finally {
+    restore();
+  }
+});

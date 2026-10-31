@@ -79,7 +79,7 @@ function getSessionResponse(data: unknown): SessionResponse {
       typeof id === "number" &&
       Number.isInteger(id) &&
       typeof email === "string" &&
-      (role === "student" || role === "admin")
+      (role === "student" || role === "student_admin" || role === "admin")
     ) {
       const session: AuthenticatedSession = {
         authenticated: true,
@@ -449,7 +449,9 @@ function parseAdminUsers(data: unknown): AdminUser[] {
       typeof user.id !== "number" ||
       typeof user.email !== "string" ||
       typeof user.full_name !== "string" ||
-      (user.role !== "STUDENT" && user.role !== "ADMIN") ||
+      (user.role !== "STUDENT" &&
+        user.role !== "STUDENT_ADMIN" &&
+        user.role !== "ADMIN") ||
       typeof user.is_active !== "boolean" ||
       typeof user.is_staff !== "boolean"
     ) {
@@ -480,12 +482,30 @@ function getCsrfToken(): string | null {
 function getErrorMessage(data: unknown, status: number): string {
   if (typeof data === "object" && data !== null) {
     const body = data as Record<string, unknown>;
+    const fieldErrors = isRecord(body.fields)
+      ? Object.entries(body.fields).flatMap(([field, value]) => {
+          const messages = Array.isArray(value) ? value : [value];
+          return messages
+            .filter((message): message is string =>
+              typeof message === "string" && Boolean(message.trim()),
+            )
+            .map((message) => `${field}: ${message.trim()}`);
+        })
+      : [];
+    let message = "";
     for (const key of ["error", "message", "detail"]) {
       const value = body[key];
       if (typeof value === "string" && value.trim()) {
-        return value.trim().slice(0, 300);
+        message = value.trim();
+        break;
       }
     }
+    if (fieldErrors.length > 0) {
+      return [message || "Verifique os dados enviados.", ...fieldErrors]
+        .join(" ")
+        .slice(0, 500);
+    }
+    if (message) return message.slice(0, 300);
   }
 
   if (status === 403) {
@@ -830,7 +850,7 @@ export async function getAdminStages(
 }
 
 export async function updateAdminStage(
-  stage: "survey" | "proposal_submission" | "voting",
+  stage: "survey" | "proposal_submission" | "voting" | "results_release",
   action: "open" | "close",
 ): Promise<{ message: string }> {
   const data = await apiRequest<unknown>(
@@ -859,7 +879,7 @@ export async function getAdminUsers(
 
 export async function updateAdminUserRole(
   userId: number,
-  role: "ADMIN" | "STUDENT",
+  role: "ADMIN" | "STUDENT_ADMIN" | "STUDENT",
 ): Promise<{ message: string }> {
   const data = await apiRequest<unknown>(
     `/api/election/admin/users/${userId}/role/`,

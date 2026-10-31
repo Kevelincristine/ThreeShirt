@@ -6,6 +6,7 @@ import { App } from "../../src/app/App";
 import { AuthProvider } from "../../src/app/AuthContext";
 import { RequireAdmin } from "../../src/app/RequireAdmin";
 import { RequireStudent } from "../../src/app/RequireStudent";
+import { AdminDashboardPage } from "../../src/pages/AdminDashboardPage";
 import { HomePage } from "../../src/pages/HomePage";
 import { StudentGalleryPage } from "../../src/pages/StudentGalleryPage";
 import { StudentDashboardPage } from "../../src/pages/StudentDashboardPage";
@@ -16,6 +17,10 @@ import {
   ApiError,
   castStudentVote,
   getApprovedStudentProposals,
+  getAdminDashboard,
+  getAdminProposals,
+  getAdminStages,
+  getAdminUsers,
   getSession,
   getStudentDashboard,
   getStudentPreferences,
@@ -24,6 +29,9 @@ import {
   logoutSession,
   saveStudentPreferences,
   submitStudentProposal,
+  updateAdminStage,
+  updateAdminUserRole,
+  updateAdminUserStatus,
 } from "../../src/services/api";
 
 vi.mock("../../src/services/api", () => ({
@@ -34,6 +42,10 @@ vi.mock("../../src/services/api", () => ({
   },
   castStudentVote: vi.fn(),
   getApprovedStudentProposals: vi.fn(),
+  getAdminDashboard: vi.fn(),
+  getAdminProposals: vi.fn(),
+  getAdminStages: vi.fn(),
+  getAdminUsers: vi.fn(),
   getSession: vi.fn(),
   getStudentDashboard: vi.fn(),
   getStudentPreferences: vi.fn(),
@@ -42,6 +54,9 @@ vi.mock("../../src/services/api", () => ({
   logoutSession: vi.fn(),
   saveStudentPreferences: vi.fn(),
   submitStudentProposal: vi.fn(),
+  updateAdminStage: vi.fn(),
+  updateAdminUserRole: vi.fn(),
+  updateAdminUserStatus: vi.fn(),
 }));
 
 const dashboard = {
@@ -126,6 +141,168 @@ test("an admin can navigate between the student and admin areas in one session",
   await user.click(screen.getByRole("link", { name: "Administração" }));
   expect(await screen.findByText("Painel administrativo protegido")).toBeTruthy();
   expect(getSession).toHaveBeenCalledTimes(1);
+});
+
+test("a student administrator sees both menus and can enter both protected areas", async () => {
+  const user = userEvent.setup();
+  vi.mocked(getSession).mockResolvedValue({
+    authenticated: true,
+    user: { id: 9, email: "hybrid@school.test", role: "student_admin" },
+  });
+
+  render(
+    <MemoryRouter initialEntries={["/"]}>
+      <AuthProvider>
+        <Routes>
+          <Route element={<App />}>
+            <Route element={<HomePage />} index />
+            <Route
+              element={
+                <RequireStudent>
+                  <p>Painel estudantil protegido</p>
+                </RequireStudent>
+              }
+              path="student"
+            />
+            <Route
+              element={
+                <RequireStudent>
+                  <p>Preferências protegidas</p>
+                </RequireStudent>
+              }
+              path="student/preferences"
+            />
+            <Route
+              element={
+                <RequireAdmin>
+                  <p>Administração protegida</p>
+                </RequireAdmin>
+              }
+              path="admin"
+            />
+          </Route>
+        </Routes>
+      </AuthProvider>
+    </MemoryRouter>,
+  );
+
+  expect(await screen.findByText(/estudante e administrador/)).toBeTruthy();
+  expect(screen.getByRole("link", { name: "Propostas" })).toBeTruthy();
+  expect(screen.getByRole("link", { name: "Administração" })).toBeTruthy();
+  await user.click(screen.getByRole("link", { name: "Preferências" }));
+  expect(await screen.findByText("Preferências protegidas")).toBeTruthy();
+  await user.click(screen.getByRole("link", { name: "Administração" }));
+  expect(await screen.findByText("Administração protegida")).toBeTruthy();
+  expect(getSession).toHaveBeenCalledTimes(1);
+});
+
+test("a student administrator keeps student actions on both student panels", async () => {
+  vi.mocked(getSession).mockResolvedValue({
+    authenticated: true,
+    user: { id: 9, email: "hybrid@school.test", role: "student_admin" },
+  });
+  vi.mocked(getStudentDashboard).mockResolvedValue({
+    ...dashboard,
+    voting_open: true,
+  });
+  vi.mocked(getApprovedStudentProposals).mockResolvedValue([{
+    id: 3,
+    title: "Proposta aprovada",
+    description: "Design aprovado",
+    image_url: "/proposal/3/image/",
+    base_color: "BLACK",
+    related_to_course: true,
+    animal: "",
+    additional_colors: ["BLUE"],
+    has_collar: true,
+    has_phrase: false,
+    phrase_text: "",
+  }]);
+
+  render(
+    <MemoryRouter>
+      <AuthProvider>
+        <StudentDashboardPage />
+      </AuthProvider>
+    </MemoryRouter>,
+  );
+  expect(await screen.findByRole("link", { name: "Responder pesquisa" })).toBeTruthy();
+  expect(screen.getByText("Sem voto registrado")).toBeTruthy();
+
+  cleanup();
+  render(
+    <MemoryRouter>
+      <AuthProvider>
+        <StudentGalleryPage />
+      </AuthProvider>
+    </MemoryRouter>,
+  );
+  expect(await screen.findByRole("button", { name: "Votar nesta proposta" })).toBeTruthy();
+});
+
+test("admin user management offers all roles and shows account activation state", async () => {
+  const user = userEvent.setup();
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  vi.mocked(getAdminDashboard).mockResolvedValue({
+    survey_open: false,
+    proposal_submission_open: false,
+    voting_open: false,
+    results_release_authorized: false,
+    counts: {
+      students_total: 1,
+      users_total: 1,
+      proposals_pending: 0,
+      proposals_approved: 0,
+      proposals_rejected: 0,
+      preferences_responses: 0,
+      votes_cast: 0,
+      admins_total: 0,
+    },
+    progress: { survey_participation: 0, survey_completed: 0 },
+  });
+  vi.mocked(getAdminProposals).mockResolvedValue([]);
+  vi.mocked(getAdminStages).mockResolvedValue({
+    survey_open: false,
+    proposal_submission_open: false,
+    voting_open: false,
+    results_release_authorized: false,
+  });
+  vi.mocked(getAdminUsers).mockResolvedValue([
+    {
+      id: 44,
+      email: "student@school.test",
+      full_name: "Estudante",
+      role: "STUDENT",
+      is_active: true,
+      is_staff: false,
+    },
+    {
+      id: 45,
+      email: "hybrid@school.test",
+      full_name: "Estudante Admin",
+      role: "STUDENT_ADMIN",
+      is_active: false,
+      is_staff: false,
+    },
+  ]);
+  vi.mocked(updateAdminUserRole).mockResolvedValue({ message: "Atualizado." });
+
+  render(
+    <MemoryRouter>
+      <AdminDashboardPage />
+    </MemoryRouter>,
+  );
+
+  expect(await screen.findByText("Conta ativa")).toBeTruthy();
+  expect(screen.getByText("Conta inativa")).toBeTruthy();
+  expect(screen.getByText("Estudante e administrador")).toBeTruthy();
+  await user.click(screen.getByRole("button", {
+    name: "Definir: Estudante e administrador",
+  }));
+  await waitFor(() => {
+    expect(updateAdminUserRole).toHaveBeenCalledWith(44, "STUDENT_ADMIN");
+  });
+  confirm.mockRestore();
 });
 
 test("an admin is restricted from student participation routes", async () => {

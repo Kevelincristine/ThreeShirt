@@ -44,7 +44,10 @@ export function RequireStudent({
     return <Navigate replace to="/login" />;
   }
 
-  if (state.user.role !== "student" && !allowAdmin) {
+  const isStudent =
+    state.user.role === "student" || state.user.role === "student_admin";
+  const isAllowedAdmin = allowAdmin && state.user.role === "admin";
+  if (!isStudent && !isAllowedAdmin) {
     return (
       <section aria-labelledby="student-access-title" className="paper-panel">
         <p className="eyebrow">Acesso restrito</p>

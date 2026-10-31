@@ -10,6 +10,14 @@ export function App() {
   const navigate = useNavigate();
   const [logoutPending, setLogoutPending] = useState(false);
   const [logoutError, setLogoutError] = useState("");
+  const isAuthenticated = state.status === "authenticated";
+  const isStudent =
+    isAuthenticated &&
+    (state.user.role === "student" || state.user.role === "student_admin");
+  const isAdmin =
+    isAuthenticated &&
+    (state.user.role === "admin" || state.user.role === "student_admin");
+  const isAdminOnly = isAuthenticated && state.user.role === "admin";
 
   async function handleLogout(): Promise<void> {
     if (logoutPending) return;
@@ -37,8 +45,7 @@ export function App() {
         <Navbar
           links={[
             { href: "/", label: "Início" },
-            ...(state.status === "authenticated" &&
-            state.user.role === "student"
+            ...(isStudent
               ? [
                   { href: "/student", label: "Painel" },
                   { href: "/student/preferences", label: "Preferências" },
@@ -47,15 +54,13 @@ export function App() {
                   { href: "/student/results", label: "Resultados" },
                 ]
               : []),
-            ...(state.status === "authenticated" &&
-            state.user.role === "admin"
+            ...(isAdminOnly
               ? [
                   { href: "/student", label: "Painel da eleição" },
                   { href: "/student/gallery", label: "Propostas aprovadas" },
                 ]
               : []),
-            ...(state.status === "authenticated" &&
-            state.user.role === "admin"
+            ...(isAdmin
               ? [{ href: "/admin", label: "Administração" }]
               : []),
             ...(state.status === "authenticated"

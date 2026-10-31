@@ -17,6 +17,7 @@ class ElectionSettingsForm(forms.ModelForm):
         model = ElectionSettings
         fields = (
             "survey_open",
+            "proposal_submission_open",
             "voting_open",
             "results_release_authorized",
         )
@@ -72,11 +73,13 @@ class ElectionSettingsAdmin(admin.ModelAdmin):
     form = ElectionSettingsForm
     fields = (
         "survey_open",
+        "proposal_submission_open",
         "voting_open",
         "results_release_authorized",
     )
     list_display = (
         "survey_open",
+        "proposal_submission_open",
         "voting_open",
         "results_release_authorized",
         "updated_at",

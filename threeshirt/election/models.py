@@ -296,7 +296,7 @@ class ElectionSettings(models.Model):
                 "Feche a pesquisa de preferências antes de abrir a votação."
             )
 
-        if self.voting_open and self.proposal_submission_open is False:
+        if self.voting_open and self.proposal_submission_open is not False:
             raise ValidationError(
                 "Feche o envio de propostas antes de abrir a votação."
             )
