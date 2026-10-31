@@ -39,6 +39,16 @@ urlpatterns = [
         name="admin-user-status",
     ),
     path(
+        "api/election/admin/maintenance/preview/",
+        views.admin_maintenance_preview,
+        name="admin-maintenance-preview",
+    ),
+    path(
+        "api/election/admin/maintenance/confirm/",
+        views.admin_maintenance_confirm,
+        name="admin-maintenance-confirm",
+    ),
+    path(
         "api/election/admin/progress/",
         views.admin_progress,
         name="admin-progress",

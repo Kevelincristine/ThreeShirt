@@ -265,6 +265,67 @@ test("admin API preserves hybrid roles and accepts results release controls", as
   }
 });
 
+test("maintenance API performs server preview and one-time confirmation requests", async () => {
+  const calls = [];
+  const restore = setFetch(async (url, init) => {
+    calls.push({ url: String(url), init });
+    if (String(url).endsWith("/maintenance/preview/")) {
+      return mockResponse({
+        challenge_token: "server-issued-token",
+        expires_at: "2026-10-31T12:00:00-03:00",
+        action: "RESET_ELECTION",
+        target: { label: "Todos os dados eleitorais" },
+        summary: {
+          votes: 4,
+          preference_responses: 3,
+          proposals: 2,
+          proposal_images: 2,
+          files_to_remove: 2,
+          settings_rows: 1,
+          accounts_preserved: 5,
+          profiles_preserved: 5,
+          email_login_codes_preserved: 2,
+          login_rate_buckets_preserved: 1,
+        },
+        warning: "",
+        restored_settings: {
+          survey_open: false,
+          proposal_submission_open: true,
+          voting_open: false,
+          results_release_authorized: false,
+          compatibility_weight: 50,
+        },
+      });
+    }
+    return mockResponse({
+      message: "Dados eleitorais reiniciados.",
+      affected: { votes: 4, proposals: 2 },
+      warning: "",
+      file_cleanup_pending: false,
+    });
+  });
+  try {
+    const preview = await api.previewAdminMaintenance("reset_election");
+    assert.equal(preview.action, "RESET_ELECTION");
+    assert.equal(preview.summary.accounts_preserved, 5);
+    await api.confirmAdminMaintenance(
+      preview.challenge_token,
+      "REINICIAR ELEIÇÃO",
+    );
+    assert.deepEqual(JSON.parse(calls[0].init.body), {
+      action: "reset_election",
+    });
+    assert.deepEqual(JSON.parse(calls[1].init.body), {
+      challenge_token: "server-issued-token",
+      confirmation_phrase: "REINICIAR ELEIÇÃO",
+    });
+    assert.equal(calls[0].init.headers.get("X-CSRFToken"), "test-token");
+    assert.equal(calls[1].init.headers.get("X-CSRFToken"), "test-token");
+  } finally {
+    restore();
+  }
+});
+
 test("API errors include backend field validation messages", async () => {
   const restore = setFetch(async () => mockResponse({
     error: "Verifique os dados enviados.",

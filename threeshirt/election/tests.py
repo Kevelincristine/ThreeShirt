@@ -36,10 +36,22 @@ from django.urls import reverse
 from PIL import Image
 
 from accounts.admin import three_shirt_admin
-from accounts.models import UserProfile
+from accounts.models import (
+    EmailLoginCode,
+    LoginRequestRateBucket,
+    UserProfile,
+)
 
 from .admin import ElectionSettingsAdmin, ShirtProposalAdmin
-from .models import ElectionSettings, PreferenceResponse, ShirtProposal, Vote
+from .models import (
+    ElectionSettings,
+    MaintenanceAudit,
+    MaintenanceConfirmation,
+    MaintenanceFileCleanup,
+    PreferenceResponse,
+    ShirtProposal,
+    Vote,
+)
 from .services import (
     calculate_compatibility,
     get_approved_proposal_compatibilities,
@@ -3915,3 +3927,443 @@ class StudentElectionActionApiTests(TestCase):
                 session_response.json(),
                 {"authenticated": False},
             )
+
+
+@override_settings(ADMIN_EMAILS=["maintenance_admin@school.com"])
+class AdminMaintenanceApiTests(TestCase):
+    preview_url = "/api/election/admin/maintenance/preview/"
+    confirm_url = "/api/election/admin/maintenance/confirm/"
+
+    def setUp(self):
+        self.private_media = tempfile.TemporaryDirectory()
+        media_settings = override_settings(
+            PRIVATE_MEDIA_ROOT=Path(self.private_media.name),
+        )
+        media_settings.enable()
+        self.addCleanup(media_settings.disable)
+        self.addCleanup(self.private_media.cleanup)
+
+        self.admin = User.objects.create_user(
+            username="maintenance_admin",
+            email="maintenance_admin@school.com",
+            is_staff=False,
+        )
+        UserProfile.objects.create(
+            user=self.admin,
+            role=UserProfile.Role.ADMIN,
+        )
+        self.client.force_login(self.admin)
+
+    def create_user(self, username, role=UserProfile.Role.STUDENT, email=None):
+        user = User.objects.create_user(
+            username=username,
+            email=email or f"{username}@school.com",
+        )
+        UserProfile.objects.create(user=user, role=role)
+        return user
+
+    def create_proposal(self, author, status, image_name=None, title=None):
+        return ShirtProposal.objects.create(
+            author=author,
+            title=title or f"Proposta {author.username}",
+            description="Descrição de teste",
+            image=image_name or "",
+            base_color="BLACK",
+            related_to_course=True,
+            additional_colors=["BLUE"],
+            has_collar=True,
+            has_phrase=False,
+            phrase_text="",
+            status=status,
+        )
+
+    def preview(self, action, target_id=None):
+        payload = {"action": action}
+        if target_id is not None:
+            payload["target_id"] = target_id
+        return self.client.post(
+            self.preview_url,
+            data=json.dumps(payload),
+            content_type="application/json",
+        )
+
+    def confirm(self, token, phrase=None):
+        payload = {"challenge_token": token}
+        if phrase is not None:
+            payload["confirmation_phrase"] = phrase
+        return self.client.post(
+            self.confirm_url,
+            data=json.dumps(payload),
+            content_type="application/json",
+        )
+
+    def test_only_active_admin_role_can_preview_or_confirm_maintenance(self):
+        student = self.create_user("maintenance_student")
+        student_admin = self.create_user(
+            "maintenance_student_admin",
+            UserProfile.Role.STUDENT_ADMIN,
+        )
+        self.client.logout()
+        anonymous_preview = self.preview("reset_election")
+        self.assertEqual(anonymous_preview.status_code, 403)
+
+        for user in (student, student_admin):
+            with self.subTest(role=user.profile.role):
+                self.client.force_login(user)
+                self.assertEqual(
+                    self.preview("reset_election").status_code,
+                    403,
+                )
+                self.assertEqual(
+                    self.confirm("untrusted-token").status_code,
+                    403,
+                )
+
+    def test_account_deletion_removes_only_target_and_protected_related_rows(self):
+        target = self.create_user("maintenance_target")
+        other_student = self.create_user("maintenance_other")
+        external_author = self.create_user("maintenance_author")
+        PreferenceResponse.objects.create(
+            student=target,
+            base_color="BLACK",
+            related_to_course=True,
+            wants_animal=False,
+            preferred_animal="",
+            preferred_colors=["BLUE"],
+            wants_collar=True,
+            wants_phrase=False,
+            intends_to_buy=True,
+        )
+        target_proposal = self.create_proposal(
+            target,
+            ShirtProposal.Status.PENDING,
+            "shirt_proposals/target.png",
+        )
+        external_proposal = self.create_proposal(
+            external_author,
+            ShirtProposal.Status.APPROVED,
+            "shirt_proposals/external.png",
+        )
+        Vote.objects.create(student=target, proposal=external_proposal)
+        Vote.objects.create(student=other_student, proposal=target_proposal)
+        login_code = EmailLoginCode.objects.create(
+            email=target.email,
+            code_hash="hashed-code",
+            expires_at=timezone.now() + timedelta(minutes=10),
+        )
+
+        response = self.preview("delete_user", target.pk)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["summary"]["votes"], 2)
+        self.assertEqual(
+            response.json()["summary"]["preference_responses"],
+            1,
+        )
+        self.assertEqual(response.json()["summary"]["proposals"], 1)
+        token = response.json()["challenge_token"]
+
+        deleted = self.confirm(token)
+
+        self.assertEqual(deleted.status_code, 200)
+        self.assertFalse(User.objects.filter(pk=target.pk).exists())
+        self.assertFalse(UserProfile.objects.filter(user_id=target.pk).exists())
+        self.assertFalse(
+            PreferenceResponse.objects.filter(student_id=target.pk).exists()
+        )
+        self.assertFalse(ShirtProposal.objects.filter(pk=target_proposal.pk).exists())
+        self.assertTrue(ShirtProposal.objects.filter(pk=external_proposal.pk).exists())
+        self.assertTrue(User.objects.filter(pk=other_student.pk).exists())
+        self.assertTrue(User.objects.filter(pk=external_author.pk).exists())
+        self.assertFalse(Vote.objects.exists())
+        self.assertFalse(EmailLoginCode.objects.filter(pk=login_code.pk).exists())
+        self.assertEqual(MaintenanceAudit.objects.count(), 1)
+        self.assertEqual(MaintenanceAudit.objects.get().actor_id, self.admin.pk)
+        self.assertEqual(
+            MaintenanceAudit.objects.get().actor_identifier,
+            self.admin.pk,
+        )
+        self.assertEqual(
+            MaintenanceAudit.objects.get().affected_counts["votes"],
+            2,
+        )
+        self.assertEqual(self.confirm(token).status_code, 409)
+
+    def test_account_deletion_preserves_codes_for_a_shared_email(self):
+        shared_email = "shared@school.com"
+        target = self.create_user(
+            "shared_target",
+            email=shared_email,
+        )
+        self.create_user(
+            "shared_remaining",
+            email=shared_email,
+        )
+        code = EmailLoginCode.objects.create(
+            email=shared_email,
+            code_hash="hashed-code",
+            expires_at=timezone.now() + timedelta(minutes=10),
+        )
+
+        preview = self.preview("delete_user", target.pk)
+
+        self.assertEqual(preview.status_code, 200)
+        self.assertEqual(preview.json()["summary"]["email_login_codes"], 0)
+        self.assertIn("mesmo e-mail", preview.json()["warning"])
+        deleted = self.confirm(preview.json()["challenge_token"])
+
+        self.assertEqual(deleted.status_code, 200)
+        self.assertTrue(EmailLoginCode.objects.filter(pk=code.pk).exists())
+
+    def test_last_admin_cannot_be_deleted(self):
+        preview = self.preview("delete_user", self.admin.pk)
+
+        self.assertEqual(preview.status_code, 400)
+        self.assertIn("última conta", preview.json()["fields"]["form"][0])
+        self.assertTrue(User.objects.filter(pk=self.admin.pk).exists())
+
+    def test_proposal_deletion_supports_each_status_and_removes_votes(self):
+        for status in ShirtProposal.Status.values:
+            with self.subTest(status=status):
+                author = self.create_user(f"proposal_author_{status.lower()}")
+                voter = self.create_user(f"proposal_voter_{status.lower()}")
+                proposal = self.create_proposal(author, status)
+                Vote.objects.create(student=voter, proposal=proposal)
+
+                preview = self.preview("delete_proposal", proposal.pk)
+
+                self.assertEqual(preview.status_code, 200)
+                self.assertEqual(preview.json()["summary"]["proposals"], 1)
+                self.assertEqual(preview.json()["summary"]["votes"], 1)
+                deleted = self.confirm(preview.json()["challenge_token"])
+
+                self.assertEqual(deleted.status_code, 200)
+                self.assertFalse(ShirtProposal.objects.filter(pk=proposal.pk).exists())
+                self.assertFalse(Vote.objects.filter(student=voter).exists())
+                self.assertTrue(User.objects.filter(pk=author.pk).exists())
+                self.assertTrue(User.objects.filter(pk=voter.pk).exists())
+
+    def test_proposal_image_is_removed_after_confirmation_and_open_vote_is_warned(self):
+        author = self.create_user("image_proposal_author")
+        voter = self.create_user("image_proposal_voter")
+        proposal = self.create_proposal(
+            author,
+            ShirtProposal.Status.APPROVED,
+        )
+        proposal.image.save("proposal.png", make_test_image(), save=True)
+        image_name = proposal.image.name
+        Vote.objects.create(student=voter, proposal=proposal)
+        ElectionSettings.objects.create(
+            voting_open=True,
+            voting_started_at=timezone.now(),
+        )
+
+        preview = self.preview("delete_proposal", proposal.pk)
+
+        self.assertEqual(preview.status_code, 200)
+        self.assertIn("votação está aberta", preview.json()["warning"])
+        self.assertEqual(preview.json()["summary"]["proposal_images"], 1)
+        deleted = self.confirm(preview.json()["challenge_token"])
+
+        self.assertEqual(deleted.status_code, 200)
+        self.assertFalse(proposal.image.storage.exists(image_name))
+        self.assertTrue(ElectionSettings.objects.get(pk=1).voting_open)
+
+    def test_shared_proposal_image_is_not_removed_while_another_proposal_uses_it(self):
+        first_author = self.create_user("shared_image_first_author")
+        second_author = self.create_user("shared_image_second_author")
+        first = self.create_proposal(first_author, ShirtProposal.Status.PENDING)
+        first.image.save("shared.png", make_test_image(), save=True)
+        second = self.create_proposal(
+            second_author,
+            ShirtProposal.Status.PENDING,
+            image_name=first.image.name,
+        )
+        image_name = first.image.name
+
+        first_preview = self.preview("delete_proposal", first.pk)
+
+        self.assertEqual(first_preview.status_code, 200)
+        self.assertEqual(first_preview.json()["summary"]["files_to_remove"], 0)
+        self.assertIn("outra proposta", first_preview.json()["warning"])
+        self.assertEqual(
+            self.confirm(first_preview.json()["challenge_token"]).status_code,
+            200,
+        )
+        self.assertTrue(first.image.storage.exists(image_name))
+        self.assertTrue(ShirtProposal.objects.filter(pk=second.pk).exists())
+
+        second_preview = self.preview("delete_proposal", second.pk)
+        self.assertEqual(second_preview.json()["summary"]["files_to_remove"], 1)
+        self.assertEqual(
+            self.confirm(second_preview.json()["challenge_token"]).status_code,
+            200,
+        )
+        self.assertFalse(first.image.storage.exists(image_name))
+
+    def test_failed_image_cleanup_is_reported_and_remains_retryable(self):
+        author = self.create_user("cleanup_retry_author")
+        proposal = self.create_proposal(author, ShirtProposal.Status.PENDING)
+        proposal.image.save("retry.png", make_test_image(), save=True)
+        image_name = proposal.image.name
+        storage = proposal.image.storage
+        preview = self.preview("delete_proposal", proposal.pk)
+
+        with (
+            patch.object(storage, "delete", side_effect=PermissionError),
+            patch("election.views.logger.exception"),
+        ):
+            result = self.confirm(preview.json()["challenge_token"])
+
+        self.assertEqual(result.status_code, 200)
+        self.assertTrue(result.json()["file_cleanup_pending"])
+        self.assertFalse(ShirtProposal.objects.filter(pk=proposal.pk).exists())
+        self.assertTrue(storage.exists(image_name))
+        cleanup_item = MaintenanceFileCleanup.objects.get(
+            storage_name=image_name,
+        )
+
+        from .views import _process_maintenance_file_cleanup
+
+        self.assertEqual(_process_maintenance_file_cleanup(), 0)
+        self.assertFalse(storage.exists(image_name))
+        self.assertFalse(
+            MaintenanceFileCleanup.objects.filter(pk=cleanup_item.pk).exists()
+        )
+
+    def test_election_reset_requires_exact_phrase_and_preserves_access_data(self):
+        student = self.create_user("reset_student")
+        hybrid = self.create_user(
+            "reset_hybrid",
+            UserProfile.Role.STUDENT_ADMIN,
+        )
+        PreferenceResponse.objects.create(
+            student=student,
+            base_color="BLACK",
+            related_to_course=True,
+            wants_animal=False,
+            preferred_animal="",
+            preferred_colors=["BLUE"],
+            wants_collar=True,
+            wants_phrase=False,
+            intends_to_buy=True,
+        )
+        proposal = self.create_proposal(
+            student,
+            ShirtProposal.Status.APPROVED,
+            "shirt_proposals/reset.png",
+        )
+        Vote.objects.create(student=hybrid, proposal=proposal)
+        ElectionSettings.objects.create(
+            survey_open=True,
+            proposal_submission_open=False,
+            voting_open=False,
+            results_release_authorized=True,
+            survey_closed_at=timezone.now(),
+            voting_started_at=timezone.now(),
+            voting_ended_at=timezone.now(),
+            compatibility_weight=75,
+        )
+        code = EmailLoginCode.objects.create(
+            email=student.email,
+            code_hash="hashed-code",
+            expires_at=timezone.now() + timedelta(minutes=10),
+        )
+        rate_bucket = LoginRequestRateBucket.objects.create(
+            key_digest="a" * 64,
+        )
+        original_profiles = list(
+            UserProfile.objects.order_by("pk").values_list("user_id", "role")
+        )
+        original_users = list(User.objects.order_by("pk").values_list("pk", flat=True))
+
+        preview = self.preview("reset_election")
+
+        self.assertEqual(preview.status_code, 200)
+        self.assertEqual(preview.json()["summary"]["votes"], 1)
+        self.assertEqual(preview.json()["summary"]["proposals"], 1)
+        self.assertEqual(preview.json()["summary"]["accounts_preserved"], 3)
+        self.assertEqual(
+            self.confirm(preview.json()["challenge_token"], "reiniciar eleição").status_code,
+            400,
+        )
+        self.assertTrue(ShirtProposal.objects.filter(pk=proposal.pk).exists())
+
+        deleted = self.confirm(
+            preview.json()["challenge_token"],
+            "REINICIAR ELEIÇÃO",
+        )
+
+        self.assertEqual(deleted.status_code, 200)
+        self.assertFalse(ShirtProposal.objects.exists())
+        self.assertFalse(PreferenceResponse.objects.exists())
+        self.assertFalse(Vote.objects.exists())
+        self.assertEqual(
+            list(User.objects.order_by("pk").values_list("pk", flat=True)),
+            original_users,
+        )
+        self.assertEqual(
+            list(UserProfile.objects.order_by("pk").values_list("user_id", "role")),
+            original_profiles,
+        )
+        self.assertTrue(EmailLoginCode.objects.filter(pk=code.pk).exists())
+        self.assertTrue(LoginRequestRateBucket.objects.filter(pk=rate_bucket.pk).exists())
+        settings = ElectionSettings.objects.get(pk=1)
+        self.assertFalse(settings.survey_open)
+        self.assertTrue(settings.proposal_submission_open)
+        self.assertFalse(settings.voting_open)
+        self.assertFalse(settings.results_release_authorized)
+        self.assertIsNone(settings.survey_closed_at)
+        self.assertIsNone(settings.voting_started_at)
+        self.assertIsNone(settings.voting_ended_at)
+        self.assertEqual(settings.compatibility_weight, 50)
+
+    def test_stale_preview_and_replayed_confirmation_do_not_mutate_data(self):
+        author = self.create_user("stale_proposal_author")
+        proposal = self.create_proposal(author, ShirtProposal.Status.PENDING)
+        preview = self.preview("delete_proposal", proposal.pk)
+        proposal.status = ShirtProposal.Status.REJECTED
+        proposal.save(update_fields=["status"])
+
+        stale = self.confirm(preview.json()["challenge_token"])
+
+        self.assertEqual(stale.status_code, 409)
+        self.assertTrue(ShirtProposal.objects.filter(pk=proposal.pk).exists())
+        self.assertFalse(MaintenanceAudit.objects.exists())
+        self.assertFalse(MaintenanceConfirmation.objects.exists())
+
+    def test_database_failure_rolls_back_deletion_and_audit(self):
+        target = self.create_user("rollback_target")
+        PreferenceResponse.objects.create(
+            student=target,
+            base_color="BLACK",
+            related_to_course=True,
+            wants_animal=False,
+            preferred_animal="",
+            preferred_colors=["BLUE"],
+            wants_collar=True,
+            wants_phrase=False,
+            intends_to_buy=True,
+        )
+        preview = self.preview("delete_user", target.pk)
+        from .views import _apply_maintenance_action
+
+        def delete_then_fail(*args):
+            _apply_maintenance_action(*args)
+            raise DatabaseError("Simulated maintenance failure.")
+
+        with (
+            patch(
+                "election.views._apply_maintenance_action",
+                side_effect=delete_then_fail,
+            ),
+            patch("election.views.logger.exception"),
+        ):
+            response = self.confirm(preview.json()["challenge_token"])
+
+        self.assertEqual(response.status_code, 500)
+        self.assertTrue(User.objects.filter(pk=target.pk).exists())
+        self.assertTrue(
+            PreferenceResponse.objects.filter(student_id=target.pk).exists()
+        )
+        self.assertFalse(MaintenanceAudit.objects.exists())
+        self.assertFalse(MaintenanceFileCleanup.objects.exists())

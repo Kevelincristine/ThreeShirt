@@ -320,3 +320,50 @@ class ElectionSettings(models.Model):
 
     def __str__(self):
         return "Configurações do ThreeShirt"
+
+
+class MaintenanceConfirmation(models.Model):
+    class Action(models.TextChoices):
+        DELETE_USER = "DELETE_USER", "Excluir conta"
+        DELETE_PROPOSAL = "DELETE_PROPOSAL", "Excluir proposta"
+        RESET_ELECTION = "RESET_ELECTION", "Reiniciar eleição"
+
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="maintenance_confirmations",
+    )
+    token_digest = models.CharField(max_length=64, unique=True)
+    action = models.CharField(max_length=20, choices=Action.choices)
+    target_id = models.PositiveBigIntegerField(null=True, blank=True)
+    summary = models.JSONField(default=dict)
+    snapshot_digest = models.CharField(max_length=64)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+
+
+class MaintenanceAudit(models.Model):
+    class Action(models.TextChoices):
+        DELETE_USER = "DELETE_USER", "Excluir conta"
+        DELETE_PROPOSAL = "DELETE_PROPOSAL", "Excluir proposta"
+        RESET_ELECTION = "RESET_ELECTION", "Reiniciar eleição"
+
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="maintenance_audit_events",
+        null=True,
+        blank=True,
+    )
+    actor_identifier = models.PositiveBigIntegerField()
+    action = models.CharField(max_length=20, choices=Action.choices)
+    affected_counts = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+
+class MaintenanceFileCleanup(models.Model):
+    storage_name = models.CharField(max_length=255, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)

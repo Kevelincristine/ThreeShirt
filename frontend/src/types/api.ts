@@ -167,3 +167,42 @@ export interface AdminUser {
   is_active: boolean;
   is_staff: boolean;
 }
+
+export type AdminMaintenanceAction =
+  | "delete_user"
+  | "delete_proposal"
+  | "reset_election";
+
+export type AdminMaintenanceOperation =
+  | "DELETE_USER"
+  | "DELETE_PROPOSAL"
+  | "RESET_ELECTION";
+
+export interface AdminMaintenancePreview {
+  challenge_token: string;
+  expires_at: string;
+  action: AdminMaintenanceOperation;
+  target: {
+    id?: number;
+    label: string;
+    email?: string;
+    status?: ProposalStatus;
+    author?: string;
+  };
+  summary: Record<string, number>;
+  warning: string;
+  restored_settings?: {
+    survey_open: boolean;
+    proposal_submission_open: boolean;
+    voting_open: boolean;
+    results_release_authorized: boolean;
+    compatibility_weight: number;
+  };
+}
+
+export interface AdminMaintenanceResult {
+  message: string;
+  affected: Record<string, number>;
+  warning: string;
+  file_cleanup_pending: boolean;
+}

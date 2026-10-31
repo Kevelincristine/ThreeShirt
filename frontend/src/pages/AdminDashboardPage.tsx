@@ -6,17 +6,58 @@ import {
   getAdminProposals,
   getAdminStages,
   getAdminUsers,
+  previewAdminMaintenance,
+  confirmAdminMaintenance,
   reviewAdminProposal,
   updateAdminStage,
   updateAdminUserRole,
   updateAdminUserStatus,
 } from "../services/api";
-import type { AdminDashboardResponse, AdminProposal, AdminUser } from "../types/api";
+import type {
+  AdminDashboardResponse,
+  AdminMaintenanceAction,
+  AdminMaintenancePreview,
+  AdminProposal,
+  AdminUser,
+} from "../types/api";
+import { useAuth } from "../app/AuthContext";
 
 const roleLabels: Record<AdminUser["role"], string> = {
   STUDENT: "Estudante",
   STUDENT_ADMIN: "Estudante e administrador",
   ADMIN: "Administrador",
+};
+
+const maintenanceCountLabels: Record<string, string> = {
+  accounts: "Contas excluídas",
+  profiles: "Perfis excluídos",
+  preference_responses: "Respostas de pesquisa excluídas",
+  proposals: "Propostas excluídas",
+  votes: "Votos excluídos",
+  email_login_codes: "Códigos de acesso removidos",
+  group_memberships: "Vínculos com grupos removidos",
+  direct_permissions: "Permissões diretas removidas",
+  admin_log_entries: "Registros administrativos removidos",
+  proposal_images: "Imagens de proposta afetadas",
+  files_to_remove: "Arquivos físicos a remover",
+  votes_from_other_accounts: "Votos de outras contas afetados",
+  settings_rows: "Configurações eleitorais restauradas",
+  accounts_preserved: "Contas preservadas",
+  profiles_preserved: "Perfis preservados",
+  email_login_codes_preserved: "Códigos de acesso preservados",
+  login_rate_buckets_preserved: "Controles de limite de login preservados",
+};
+
+const maintenanceActionLabels: Record<AdminMaintenancePreview["action"], string> = {
+  DELETE_USER: "Exclusão de conta",
+  DELETE_PROPOSAL: "Exclusão de proposta",
+  RESET_ELECTION: "Reinicialização eleitoral",
+};
+
+const proposalStatusLabels = {
+  PENDING: "Aguardando aprovação",
+  APPROVED: "Aprovada",
+  REJECTED: "Rejeitada",
 };
 
 function formatPercent(value: number | null): string {
@@ -25,6 +66,11 @@ function formatPercent(value: number | null): string {
 }
 
 export function AdminDashboardPage() {
+  const { state: authState } = useAuth();
+  const currentUserId =
+    authState.status === "authenticated" ? authState.user.id : null;
+  const canMaintain =
+    authState.status === "authenticated" && authState.user.role === "admin";
   const [state, setState] = useState<
     | { status: "loading" }
     | {
@@ -43,6 +89,15 @@ export function AdminDashboardPage() {
   >({ status: "loading" });
 
   const [pendingAction, setPendingAction] = useState<string | null>(null);
+  const [selectedMaintenanceUser, setSelectedMaintenanceUser] = useState("");
+  const [selectedMaintenanceProposal, setSelectedMaintenanceProposal] = useState("");
+  const [maintenancePreview, setMaintenancePreview] =
+    useState<AdminMaintenancePreview | null>(null);
+  const [maintenancePhrase, setMaintenancePhrase] = useState("");
+  const [maintenanceNotice, setMaintenanceNotice] = useState<{
+    variant: "success" | "error";
+    message: string;
+  } | null>(null);
 
   const loadData = async (): Promise<void> => {
     try {
@@ -170,6 +225,93 @@ export function AdminDashboardPage() {
       setState({
         status: "error",
         message: error instanceof Error ? error.message : "Não foi possível atualizar o acesso.",
+      });
+    } finally {
+      setPendingAction(null);
+    }
+  }
+
+  async function beginMaintenance(
+    action: AdminMaintenanceAction,
+    targetId?: number,
+  ) {
+    if (pendingAction) return;
+    const operationLabel =
+      action === "delete_user"
+        ? "a exclusão definitiva desta conta"
+        : action === "delete_proposal"
+          ? "a exclusão desta proposta e dos votos associados"
+          : "a reinicialização de todos os dados eleitorais";
+    if (
+      !window.confirm(
+        `Iniciar ${operationLabel}? A próxima etapa exibirá os dados afetados antes da confirmação final.`,
+      )
+    ) {
+      return;
+    }
+
+    setPendingAction(`maintenance:preview:${action}`);
+    setMaintenancePreview(null);
+    setMaintenancePhrase("");
+    setMaintenanceNotice(null);
+    try {
+      const preview = await previewAdminMaintenance(action, targetId);
+      setMaintenancePreview(preview);
+    } catch (error) {
+      setMaintenanceNotice({
+        variant: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Não foi possível preparar a prévia da manutenção.",
+      });
+    } finally {
+      setPendingAction(null);
+    }
+  }
+
+  async function confirmMaintenance() {
+    if (!maintenancePreview || pendingAction) return;
+    if (
+      maintenancePreview.action === "RESET_ELECTION" &&
+      maintenancePhrase !== "REINICIAR ELEIÇÃO"
+    ) {
+      setMaintenanceNotice({
+        variant: "error",
+        message: "Digite exatamente REINICIAR ELEIÇÃO para continuar.",
+      });
+      return;
+    }
+
+    setPendingAction("maintenance:confirm");
+    setMaintenanceNotice(null);
+    try {
+      const result = await confirmAdminMaintenance(
+        maintenancePreview.challenge_token,
+        maintenancePhrase,
+      );
+      const notices = [result.message, result.warning].filter(Boolean);
+      if (result.file_cleanup_pending) {
+        notices.push(
+          "A remoção de uma ou mais imagens está pendente e requer nova tentativa administrativa.",
+        );
+      }
+      setMaintenanceNotice({
+        variant: "success",
+        message: notices.join(" "),
+      });
+      setMaintenancePreview(null);
+      setMaintenancePhrase("");
+      await loadData();
+    } catch (error) {
+      setMaintenancePreview(null);
+      setMaintenancePhrase("");
+      setMaintenanceNotice({
+        variant: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Não foi possível concluir a manutenção.",
       });
     } finally {
       setPendingAction(null);
@@ -356,6 +498,213 @@ export function AdminDashboardPage() {
           ))}
         </div>
       </div>
+
+      {canMaintain && (
+        <section
+          aria-labelledby="maintenance-zone-title"
+          className="admin-section maintenance-zone"
+        >
+          <div className="maintenance-zone__header">
+            <p className="eyebrow">Ações irreversíveis</p>
+            <h2 id="maintenance-zone-title">Zona de Manutenção</h2>
+            <p>
+              Faça um backup antes de prosseguir. As prévias são calculadas no
+              servidor e expiram após 10 minutos.
+            </p>
+          </div>
+
+          {maintenanceNotice && (
+            <Alert variant={maintenanceNotice.variant}>
+              {maintenanceNotice.message}
+            </Alert>
+          )}
+
+          <div className="maintenance-grid">
+            <article className="maintenance-card">
+              <h3>Excluir uma conta</h3>
+              <p>
+                Remove o perfil, respostas e votos da conta, além das propostas
+                enviadas e dos votos nelas. Nenhuma outra conta será excluída.
+              </p>
+              <label className="form-field" htmlFor="maintenance-user">
+                Conta
+                <select
+                  id="maintenance-user"
+                  value={selectedMaintenanceUser}
+                  onChange={(event) => {
+                    setSelectedMaintenanceUser(event.target.value);
+                    setMaintenancePreview(null);
+                    setMaintenanceNotice(null);
+                  }}
+                  disabled={Boolean(pendingAction)}
+                >
+                  <option value="">Selecione uma conta</option>
+                  {users.map((user) => (
+                    <option
+                      key={user.id}
+                      value={user.id}
+                      disabled={user.id === currentUserId}
+                    >
+                      {user.full_name || user.email} — {roleLabels[user.role]}
+                      {user.id === currentUserId ? " (sua conta)" : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                className="button button--danger"
+                type="button"
+                disabled={!selectedMaintenanceUser || Boolean(pendingAction)}
+                onClick={() =>
+                  void beginMaintenance(
+                    "delete_user",
+                    Number(selectedMaintenanceUser),
+                  )
+                }
+              >
+                Revisar exclusão da conta
+              </button>
+            </article>
+
+            <article className="maintenance-card">
+              <h3>Excluir uma proposta</h3>
+              <p>
+                Pode afetar votos e resultados. Propostas pendentes, aprovadas
+                e rejeitadas podem ser selecionadas.
+              </p>
+              <label className="form-field" htmlFor="maintenance-proposal">
+                Proposta
+                <select
+                  id="maintenance-proposal"
+                  value={selectedMaintenanceProposal}
+                  onChange={(event) => {
+                    setSelectedMaintenanceProposal(event.target.value);
+                    setMaintenancePreview(null);
+                    setMaintenanceNotice(null);
+                  }}
+                  disabled={Boolean(pendingAction)}
+                >
+                  <option value="">Selecione uma proposta</option>
+                  {proposals.map((proposal) => (
+                    <option key={proposal.id} value={proposal.id}>
+                      {proposal.title} — {proposalStatusLabels[proposal.status]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                className="button button--danger"
+                type="button"
+                disabled={!selectedMaintenanceProposal || Boolean(pendingAction)}
+                onClick={() =>
+                  void beginMaintenance(
+                    "delete_proposal",
+                    Number(selectedMaintenanceProposal),
+                  )
+                }
+              >
+                Revisar exclusão da proposta
+              </button>
+            </article>
+
+            <article className="maintenance-card maintenance-card--irreversible">
+              <h3>Reiniciar eleição</h3>
+              <p>
+                Remove respostas, propostas, votos e resultados calculados.
+                Todas as contas, perfis, papéis, códigos de acesso e limites de
+                login serão preservados.
+              </p>
+              <button
+                className="button button--danger"
+                type="button"
+                disabled={Boolean(pendingAction)}
+                onClick={() => void beginMaintenance("reset_election")}
+              >
+                Revisar reinicialização eleitoral
+              </button>
+            </article>
+          </div>
+
+          {maintenancePreview && (
+            <div
+              aria-labelledby="maintenance-preview-title"
+              className="maintenance-preview"
+              role="region"
+            >
+              <h3 id="maintenance-preview-title">
+                Prévia: {maintenanceActionLabels[maintenancePreview.action]}
+              </h3>
+              <p>
+                Alvo: <strong>{maintenancePreview.target.label}</strong>
+                {maintenancePreview.target.email
+                  ? ` (${maintenancePreview.target.email})`
+                  : ""}
+                {maintenancePreview.target.status
+                  ? ` — ${proposalStatusLabels[maintenancePreview.target.status]}`
+                  : ""}
+                {maintenancePreview.target.author
+                  ? ` — autoria: ${maintenancePreview.target.author}`
+                  : ""}
+              </p>
+              <dl className="maintenance-preview__counts">
+                {Object.entries(maintenancePreview.summary).map(([key, count]) => (
+                  <div key={key}>
+                    <dt>{maintenanceCountLabels[key] ?? key}</dt>
+                    <dd>{count}</dd>
+                  </div>
+                ))}
+              </dl>
+              {maintenancePreview.warning && (
+                <Alert variant="warning">{maintenancePreview.warning}</Alert>
+              )}
+              {maintenancePreview.restored_settings && (
+                <p className="maintenance-preview__defaults">
+                  Estado restaurado: pesquisa fechada, envio de propostas
+                  aberto, votação fechada, resultados bloqueados e peso de
+                  compatibilidade 50.
+                </p>
+              )}
+              {maintenancePreview.action === "RESET_ELECTION" && (
+                <label className="form-field" htmlFor="maintenance-confirmation-phrase">
+                  Para confirmar, digite <strong>REINICIAR ELEIÇÃO</strong>
+                  <input
+                    autoComplete="off"
+                    id="maintenance-confirmation-phrase"
+                    onChange={(event) => setMaintenancePhrase(event.target.value)}
+                    value={maintenancePhrase}
+                  />
+                </label>
+              )}
+              <div className="admin-actions">
+                <button
+                  className="button button--danger"
+                  type="button"
+                  disabled={
+                    Boolean(pendingAction) ||
+                    (maintenancePreview.action === "RESET_ELECTION" &&
+                      maintenancePhrase !== "REINICIAR ELEIÇÃO")
+                  }
+                  onClick={() => void confirmMaintenance()}
+                >
+                  Confirmar definitivamente
+                </button>
+                <button
+                  className="button button--secondary"
+                  type="button"
+                  disabled={Boolean(pendingAction)}
+                  onClick={() => {
+                    setMaintenancePreview(null);
+                    setMaintenancePhrase("");
+                    setMaintenanceNotice(null);
+                  }}
+                >
+                  Cancelar
+                </button>
+              </div>
+            </div>
+          )}
+        </section>
+      )}
     </section>
   );
 }

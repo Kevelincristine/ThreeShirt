@@ -1,5 +1,9 @@
 import type {
   AdminDashboardResponse,
+  AdminMaintenanceAction,
+  AdminMaintenanceOperation,
+  AdminMaintenancePreview,
+  AdminMaintenanceResult,
   AdminProposal,
   AdminUser,
   ApiMessageResponse,
@@ -31,6 +35,18 @@ export class ApiError extends Error {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function isCountRecord(value: unknown): value is Record<string, number> {
+  return (
+    isRecord(value) &&
+    Object.values(value).every(
+      (count) =>
+        typeof count === "number" &&
+        Number.isInteger(count) &&
+        count >= 0,
+    )
+  );
 }
 
 function getMessageResponse(data: unknown, status: number): ApiMessageResponse {
@@ -911,4 +927,111 @@ export async function updateAdminUserStatus(
     throw new ApiError("A resposta ao atualizar o acesso é inválida.", 200);
   }
   return { message: data.message };
+}
+
+export async function previewAdminMaintenance(
+  action: AdminMaintenanceAction,
+  targetId?: number,
+): Promise<AdminMaintenancePreview> {
+  const data = await apiRequest<unknown>(
+    "/api/election/admin/maintenance/preview/",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, target_id: targetId }),
+    },
+  );
+  const validOperation = (
+    value: unknown,
+  ): value is AdminMaintenanceOperation =>
+    value === "DELETE_USER" ||
+    value === "DELETE_PROPOSAL" ||
+    value === "RESET_ELECTION";
+  if (
+    !isRecord(data) ||
+    typeof data.challenge_token !== "string" ||
+    typeof data.expires_at !== "string" ||
+    !validOperation(data.action) ||
+    !isRecord(data.target) ||
+    typeof data.target.label !== "string" ||
+    !isCountRecord(data.summary) ||
+    typeof data.warning !== "string" ||
+    (data.target.id !== undefined &&
+      (typeof data.target.id !== "number" || !Number.isInteger(data.target.id))) ||
+    (data.target.email !== undefined && typeof data.target.email !== "string") ||
+    (data.target.author !== undefined && typeof data.target.author !== "string") ||
+    (data.target.status !== undefined && !getProposalStatus(data.target.status))
+  ) {
+    throw new ApiError("A prévia de manutenção recebida é inválida.", 200);
+  }
+
+  let restoredSettings: AdminMaintenancePreview["restored_settings"];
+  if (data.restored_settings !== undefined) {
+    const restored = data.restored_settings;
+    if (
+      !isRecord(restored) ||
+      typeof restored.survey_open !== "boolean" ||
+      typeof restored.proposal_submission_open !== "boolean" ||
+      typeof restored.voting_open !== "boolean" ||
+      typeof restored.results_release_authorized !== "boolean" ||
+      typeof restored.compatibility_weight !== "number"
+    ) {
+      throw new ApiError("O estado inicial da eleição recebido é inválido.", 200);
+    }
+    restoredSettings = {
+      survey_open: restored.survey_open,
+      proposal_submission_open: restored.proposal_submission_open,
+      voting_open: restored.voting_open,
+      results_release_authorized: restored.results_release_authorized,
+      compatibility_weight: restored.compatibility_weight,
+    };
+  }
+
+  return {
+    challenge_token: data.challenge_token,
+    expires_at: data.expires_at,
+    action: data.action,
+    target: {
+      id: typeof data.target.id === "number" ? data.target.id : undefined,
+      label: data.target.label,
+      email: typeof data.target.email === "string" ? data.target.email : undefined,
+      status: getProposalStatus(data.target.status) ? data.target.status : undefined,
+      author: typeof data.target.author === "string" ? data.target.author : undefined,
+    },
+    summary: data.summary,
+    warning: data.warning,
+    restored_settings: restoredSettings,
+  };
+}
+
+export async function confirmAdminMaintenance(
+  challengeToken: string,
+  confirmationPhrase?: string,
+): Promise<AdminMaintenanceResult> {
+  const data = await apiRequest<unknown>(
+    "/api/election/admin/maintenance/confirm/",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        challenge_token: challengeToken,
+        confirmation_phrase: confirmationPhrase,
+      }),
+    },
+  );
+  if (
+    !isRecord(data) ||
+    typeof data.message !== "string" ||
+    !isCountRecord(data.affected) ||
+    typeof data.warning !== "string" ||
+    typeof data.file_cleanup_pending !== "boolean"
+  ) {
+    throw new ApiError("A resposta à manutenção é inválida.", 200);
+  }
+  return {
+    message: data.message,
+    affected: data.affected,
+    warning: data.warning,
+    file_cleanup_pending: data.file_cleanup_pending,
+  };
 }

@@ -462,6 +462,15 @@ p {
   color: var(--color-navy);
 }
 
+.button--danger {
+  background: var(--color-error);
+  color: var(--color-white);
+}
+
+.button--danger:hover {
+  background: #8f1725;
+}
+
 .text-link {
   display: inline-block;
   margin-top: var(--space-6);
@@ -582,6 +591,98 @@ p {
 
 .admin-section {
   margin-top: var(--space-8);
+}
+
+.maintenance-zone {
+  padding: var(--space-5);
+  border: 2px solid var(--color-error);
+  border-radius: var(--radius-medium);
+  background: rgb(180 35 50 / 5%);
+}
+
+.maintenance-zone__header {
+  margin-bottom: var(--space-5);
+}
+
+.maintenance-zone__header h2,
+.maintenance-card h3,
+.maintenance-preview h3 {
+  margin-bottom: var(--space-3);
+  color: var(--color-error);
+}
+
+.maintenance-zone__header p:last-child,
+.maintenance-card p {
+  color: var(--color-text-secondary);
+}
+
+.maintenance-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
+  gap: var(--space-4);
+}
+
+.maintenance-card {
+  display: grid;
+  align-content: start;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid rgb(180 35 50 / 35%);
+  border-radius: var(--radius-medium);
+  background: var(--color-white);
+}
+
+.maintenance-card--irreversible {
+  border-width: 2px;
+  border-color: var(--color-error);
+  background: rgb(180 35 50 / 8%);
+}
+
+.maintenance-card .form-field {
+  display: grid;
+  gap: var(--space-2);
+  font-weight: 800;
+}
+
+.maintenance-preview {
+  display: grid;
+  gap: var(--space-4);
+  margin-top: var(--space-5);
+  padding: var(--space-5);
+  border: 2px solid var(--color-error);
+  border-radius: var(--radius-medium);
+  background: var(--color-white);
+}
+
+.maintenance-preview__counts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.maintenance-preview__counts div {
+  padding: var(--space-3);
+  border-radius: var(--radius-small);
+  background: rgb(180 35 50 / 6%);
+}
+
+.maintenance-preview__counts dt {
+  color: var(--color-text-secondary);
+  font-size: 0.875rem;
+  font-weight: 800;
+}
+
+.maintenance-preview__counts dd {
+  margin: var(--space-1) 0 0;
+  color: var(--color-error);
+  font-family: var(--font-heading);
+  font-size: 1.25rem;
+  font-weight: 800;
+}
+
+.maintenance-preview__defaults {
+  font-weight: 700;
 }
 
 .admin-list {

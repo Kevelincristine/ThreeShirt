@@ -16,6 +16,7 @@ import { StudentResultsPage } from "../../src/pages/StudentResultsPage";
 import {
   ApiError,
   castStudentVote,
+  confirmAdminMaintenance,
   getApprovedStudentProposals,
   getAdminDashboard,
   getAdminProposals,
@@ -27,6 +28,7 @@ import {
   getStudentResults,
   getStudentSubmissions,
   logoutSession,
+  previewAdminMaintenance,
   saveStudentPreferences,
   submitStudentProposal,
   updateAdminStage,
@@ -41,6 +43,7 @@ vi.mock("../../src/services/api", () => ({
     }
   },
   castStudentVote: vi.fn(),
+  confirmAdminMaintenance: vi.fn(),
   getApprovedStudentProposals: vi.fn(),
   getAdminDashboard: vi.fn(),
   getAdminProposals: vi.fn(),
@@ -52,6 +55,7 @@ vi.mock("../../src/services/api", () => ({
   getStudentResults: vi.fn(),
   getStudentSubmissions: vi.fn(),
   logoutSession: vi.fn(),
+  previewAdminMaintenance: vi.fn(),
   saveStudentPreferences: vi.fn(),
   submitStudentProposal: vi.fn(),
   updateAdminStage: vi.fn(),
@@ -97,6 +101,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
 });
 
 test("an admin can navigate between the student and admin areas in one session", async () => {
@@ -243,6 +248,10 @@ test("a student administrator keeps student actions on both student panels", asy
 test("admin user management offers all roles and shows account activation state", async () => {
   const user = userEvent.setup();
   const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  vi.mocked(getSession).mockResolvedValue({
+    authenticated: true,
+    user: { id: 8, email: "admin@school.test", role: "admin" },
+  });
   vi.mocked(getAdminDashboard).mockResolvedValue({
     survey_open: false,
     proposal_submission_open: false,
@@ -289,11 +298,14 @@ test("admin user management offers all roles and shows account activation state"
 
   render(
     <MemoryRouter>
-      <AdminDashboardPage />
+      <AuthProvider>
+        <AdminDashboardPage />
+      </AuthProvider>
     </MemoryRouter>,
   );
 
   expect(await screen.findByText("Conta ativa")).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Zona de Manutenção" })).toBeTruthy();
   expect(screen.getByText("Conta inativa")).toBeTruthy();
   expect(screen.getByText("Estudante e administrador")).toBeTruthy();
   await user.click(screen.getByRole("button", {
@@ -303,6 +315,141 @@ test("admin user management offers all roles and shows account activation state"
     expect(updateAdminUserRole).toHaveBeenCalledWith(44, "STUDENT_ADMIN");
   });
   confirm.mockRestore();
+});
+
+test("a student administrator can see the admin dashboard but not maintenance controls", async () => {
+  vi.mocked(getSession).mockResolvedValue({
+    authenticated: true,
+    user: { id: 9, email: "hybrid@school.test", role: "student_admin" },
+  });
+  vi.mocked(getAdminDashboard).mockResolvedValue({
+    survey_open: false,
+    proposal_submission_open: true,
+    voting_open: false,
+    results_release_authorized: false,
+    counts: {
+      students_total: 1,
+      users_total: 1,
+      proposals_pending: 0,
+      proposals_approved: 0,
+      proposals_rejected: 0,
+      preferences_responses: 0,
+      votes_cast: 0,
+      admins_total: 1,
+    },
+    progress: { survey_participation: 0, survey_completed: 0 },
+  });
+  vi.mocked(getAdminProposals).mockResolvedValue([]);
+  vi.mocked(getAdminStages).mockResolvedValue({
+    survey_open: false,
+    proposal_submission_open: true,
+    voting_open: false,
+    results_release_authorized: false,
+  });
+  vi.mocked(getAdminUsers).mockResolvedValue([]);
+
+  render(
+    <MemoryRouter>
+      <AuthProvider>
+        <AdminDashboardPage />
+      </AuthProvider>
+    </MemoryRouter>,
+  );
+
+  expect(await screen.findByRole("heading", { name: "Painel administrativo" })).toBeTruthy();
+  expect(screen.queryByRole("heading", { name: "Zona de Manutenção" })).toBeNull();
+  expect(screen.queryByRole("button", { name: /reinicialização eleitoral/i })).toBeNull();
+});
+
+test("admin maintenance requires a preview before the final account deletion", async () => {
+  const user = userEvent.setup();
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  vi.mocked(getSession).mockResolvedValue({
+    authenticated: true,
+    user: { id: 8, email: "admin@school.test", role: "admin" },
+  });
+  vi.mocked(getAdminDashboard).mockResolvedValue({
+    survey_open: false,
+    proposal_submission_open: true,
+    voting_open: false,
+    results_release_authorized: false,
+    counts: {
+      students_total: 1,
+      users_total: 2,
+      proposals_pending: 1,
+      proposals_approved: 0,
+      proposals_rejected: 0,
+      preferences_responses: 0,
+      votes_cast: 0,
+      admins_total: 1,
+    },
+    progress: { survey_participation: 0, survey_completed: 0 },
+  });
+  vi.mocked(getAdminProposals).mockResolvedValue([]);
+  vi.mocked(getAdminStages).mockResolvedValue({
+    survey_open: false,
+    proposal_submission_open: true,
+    voting_open: false,
+    results_release_authorized: false,
+  });
+  vi.mocked(getAdminUsers).mockResolvedValue([
+    {
+      id: 44,
+      email: "student@school.test",
+      full_name: "Estudante",
+      role: "STUDENT",
+      is_active: true,
+      is_staff: false,
+    },
+  ]);
+  vi.mocked(previewAdminMaintenance).mockResolvedValue({
+    challenge_token: "one-time-token",
+    expires_at: "2026-10-31T12:00:00-03:00",
+    action: "DELETE_USER",
+    target: {
+      id: 44,
+      label: "Estudante",
+      email: "student@school.test",
+    },
+    summary: {
+      accounts: 1,
+      profiles: 1,
+      preference_responses: 1,
+      proposals: 1,
+      votes: 2,
+      proposal_images: 1,
+    },
+    warning: "",
+  });
+  vi.mocked(confirmAdminMaintenance).mockResolvedValue({
+    message: "Conta e registros relacionados excluídos.",
+    affected: { accounts: 1, proposals: 1, votes: 2 },
+    warning: "",
+    file_cleanup_pending: false,
+  });
+
+  render(
+    <MemoryRouter>
+      <AuthProvider>
+        <AdminDashboardPage />
+      </AuthProvider>
+    </MemoryRouter>,
+  );
+
+  await user.selectOptions(
+    await screen.findByLabelText("Conta"),
+    "44",
+  );
+  await user.click(screen.getByRole("button", { name: "Revisar exclusão da conta" }));
+  await waitFor(() => {
+    expect(previewAdminMaintenance).toHaveBeenCalledWith("delete_user", 44);
+  });
+  expect(await screen.findByText("Votos excluídos")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Confirmar definitivamente" })).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Confirmar definitivamente" }));
+  await waitFor(() => {
+    expect(confirmAdminMaintenance).toHaveBeenCalledWith("one-time-token", "");
+  });
 });
 
 test("an admin is restricted from student participation routes", async () => {
