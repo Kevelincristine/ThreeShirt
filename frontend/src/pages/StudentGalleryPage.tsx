@@ -28,6 +28,8 @@ export function StudentGalleryPage() {
   const { state: authState } = useAuth();
   const isAdmin =
     authState.status === "authenticated" && authState.user.role === "admin";
+  const currentUserId =
+    authState.status === "authenticated" ? authState.user.id : null;
   const [state, setState] = useState<GalleryState>({ status: "loading" });
   const [selected, setSelected] = useState<StudentProposal | null>(null);
   const [voting, setVoting] = useState(false);
@@ -122,7 +124,9 @@ export function StudentGalleryPage() {
       )}
       {state.status === "ready" && state.proposals.length === 0 && (
         <div className="student-page__panel">
-          <Alert variant="info">Ainda não há propostas aprovadas para exibir.</Alert>
+          <Alert variant="info">
+            Ainda não há propostas aprovadas para exibir.
+          </Alert>
         </div>
       )}
       {state.status === "ready" && state.proposals.length > 0 && (
@@ -161,13 +165,21 @@ export function StudentGalleryPage() {
                   ].filter(Boolean).join(" · ")}
                 />
                 {!isAdmin && state.dashboard.voting_open && !state.dashboard.has_voted && (
-                  <button
-                    className="button button--primary shirt-gallery__vote"
-                    onClick={() => setSelected(proposal)}
-                    type="button"
-                  >
-                    Votar nesta proposta
-                  </button>
+                  <>
+                    <button
+                      className="button button--primary shirt-gallery__vote"
+                      disabled={proposal.author_id === currentUserId}
+                      onClick={() => setSelected(proposal)}
+                      type="button"
+                    >
+                      Votar nesta proposta
+                    </button>
+                    {proposal.author_id === currentUserId && (
+                      <p className="shirt-gallery__vote-notice" role="note">
+                        Você não pode votar na sua própria proposta
+                      </p>
+                    )}
+                  </>
                 )}
               </article>
             ))}

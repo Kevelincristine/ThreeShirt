@@ -99,7 +99,7 @@ export function App() {
         title="Confirmar saída"
       />
       <footer className="site-footer">
-        <p>ThreeShirt · criação coletiva da turma</p>
+        <p>ThreeShirt · <a href="https://github.com/Kevelincristine" target="_blank" rel="noopener noreferrer">GitHub da Criadora</a> </p>
       </footer>
     </>
   );

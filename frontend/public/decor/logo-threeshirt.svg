@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 390 100" role="img">
+  <g font-family="Georgia, 'Times New Roman', serif" font-size="31" font-weight="700" text-anchor="middle">
+    <g transform="rotate(-4 21 51)">
+      <rect x="3" y="25" width="36" height="48" rx="3" fill="#2455B8"/>
+      <text x="21" y="60" fill="#FFFFFF">T</text>
+    </g>
+    <g transform="rotate(3 60 51)">
+      <rect x="42" y="25" width="36" height="48" rx="3" fill="#FFFFFF" stroke="#172D69" stroke-width="2"/>
+      <text x="60" y="60" fill="#172D69">h</text>
+    </g>
+    <g transform="rotate(-2 99 51)">
+      <rect x="81" y="25" width="36" height="48" rx="3" fill="#78C8F2"/>
+      <text x="99" y="60" fill="#172D69">r</text>
+    </g>
+    <g transform="rotate(4 138 51)">
+      <rect x="120" y="25" width="36" height="48" rx="3" fill="#172D69"/>
+      <text x="138" y="60" fill="#FFFFFF">e</text>
+    </g>
+    <g transform="rotate(-3 177 51)">
+      <rect x="159" y="25" width="36" height="48" rx="3" fill="#FFFFFF" stroke="#2455B8" stroke-width="2"/>
+      <text x="177" y="60" fill="#2455B8">e</text>
+    </g>
+    <g transform="rotate(3 218 51)">
+      <rect x="199" y="25" width="38" height="48" rx="3" fill="#2455B8"/>
+      <text x="218" y="60" fill="#FFFFFF">S</text>
+    </g>
+    <g transform="rotate(-4 258 51)">
+      <rect x="240" y="25" width="36" height="48" rx="3" fill="#78C8F2"/>
+      <text x="258" y="60" fill="#172D69">h</text>
+    </g>
+    <g transform="rotate(3 297 51)">
+      <rect x="279" y="25" width="36" height="48" rx="3" fill="#FFFFFF" stroke="#172D69" stroke-width="2"/>
+      <text x="297" y="60" fill="#172D69">i</text>
+    </g>
+    <g transform="rotate(-2 336 51)">
+      <rect x="318" y="25" width="36" height="48" rx="3" fill="#172D69"/>
+      <text x="336" y="60" fill="#FFFFFF">r</text>
+    </g>
+    <g transform="rotate(4 375 51)">
+      <rect x="357" y="25" width="30" height="48" rx="3" fill="#2455B8"/>
+      <text x="372" y="60" fill="#FFFFFF">t</text>
+    </g>
+  </g>
+  <path d="M288 18l4-7 5 5 5-9 5 9 5-5 4 7z" fill="#F5CB76" stroke="#172D69" stroke-linejoin="round" stroke-width="1.5"/>
+</svg>

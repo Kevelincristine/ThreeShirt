@@ -60,6 +60,23 @@ const proposalStatusLabels = {
   REJECTED: "Rejeitada",
 };
 
+const preferenceColorLabels: Record<string, string> = {
+  RED: "Vermelho",
+  BLUE: "Azul",
+  YELLOW: "Amarelo",
+  GREEN: "Verde",
+  ORANGE: "Laranja",
+  PURPLE: "Roxo/violeta",
+  PINK: "Rosa",
+  BROWN: "Marrom",
+  BLACK: "Preto",
+  WHITE: "Branco",
+};
+
+function yesNo(value: boolean): string {
+  return value ? "Sim" : "Não";
+}
+
 function formatPercent(value: number | null): string {
   if (value == null) return "—";
   return `${value.toFixed(1)}%`;
@@ -430,6 +447,60 @@ export function AdminDashboardPage() {
                 </div>
                 <p>{proposal.description}</p>
                 <p>Autor: {proposal.author.full_name || proposal.author.email}</p>
+                <section aria-label={`Respostas da pesquisa de ${proposal.author.full_name || proposal.author.email}`}>
+                  <h3>Respostas da pesquisa de preferências</h3>
+                  {proposal.preferences ? (
+                    <dl className="admin-proposal-preferences">
+                      <div>
+                        <dt>Cor principal</dt>
+                        <dd>{proposal.preferences.base_color === "BLACK" ? "Preta" : "Branca"}</dd>
+                      </div>
+                      <div>
+                        <dt>Curso</dt>
+                        <dd>{yesNo(proposal.preferences.related_to_course)}</dd>
+                      </div>
+                      <div>
+                        <dt>Tema com animais</dt>
+                        <dd>{yesNo(proposal.preferences.wants_animal)}</dd>
+                      </div>
+                      <div>
+                        <dt>Animal escolhido</dt>
+                        <dd>
+                          {proposal.preferences.wants_animal
+                            ? proposal.preferences.preferred_animal.trim() || "Não respondida"
+                            : "Não se aplica"}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Cores adicionais</dt>
+                        <dd>
+                          {proposal.preferences.preferred_colors.length > 0
+                            ? proposal.preferences.preferred_colors
+                                .map((color) => preferenceColorLabels[color] ?? color)
+                                .join(", ")
+                            : "Não respondida"}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Modelo de gola</dt>
+                        <dd>{yesNo(proposal.preferences.wants_collar)}</dd>
+                      </div>
+                      <div>
+                        <dt>Frase escolhida</dt>
+                        <dd>
+                          O formulário registra apenas se deseja uma frase:{" "}
+                          {yesNo(proposal.preferences.wants_phrase)}.
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>Intenção de compra</dt>
+                        <dd>{yesNo(proposal.preferences.intends_to_buy)}</dd>
+                      </div>
+                    </dl>
+                  ) : (
+                    <p>Este estudante ainda não preencheu a pesquisa de preferências.</p>
+                  )}
+                </section>
                 {proposal.rejection_reason && proposal.status === "REJECTED" && (
                   <p>Motivo: {proposal.rejection_reason}</p>
                 )}

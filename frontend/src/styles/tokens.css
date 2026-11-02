@@ -18,6 +18,15 @@
   --font-handwritten: "Caveat", "Segoe Print", cursive;
   --font-body: "Nunito Sans", "Trebuchet MS", sans-serif;
 
+  --font-xs: 12px;
+  --font-sm: 14px;
+  --font-md: 16px;
+  --font-lg: 18px;
+  --font-xl: 20px;
+  --font-2xl: 24px;
+  --font-3xl: 30px;
+  --font-4xl: 36px;
+
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -31,9 +40,9 @@
 
   --border-width: 1px;
   --border-style: var(--border-width) solid var(--color-border);
-  --radius-small: 8px;
-  --radius-medium: 16px;
-  --radius-large: 24px;
+  --radius-small: 6px;
+  --radius-medium: 12px;
+  --radius-large: 18px;
   --radius-pill: 999px;
 
   --shadow-paper: 3px 4px 0 rgb(23 45 105 / 9%);
