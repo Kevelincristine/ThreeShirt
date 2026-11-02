@@ -701,7 +701,11 @@ class SessionStatusTests(TestCase):
 
 @override_settings(
     AUTHORIZED_LOGIN_EMAILS=[TEST_EMAIL],
-    CSRF_TRUSTED_ORIGINS=["http://127.0.0.1:5173"],
+    CSRF_TRUSTED_ORIGINS=[
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+        "http://192.168.0.95:5173",
+    ],
     EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
     PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"],
 )
@@ -712,6 +716,22 @@ class CsrfProtectionTests(TestCase):
             username="estudante_csrf",
             email=TEST_EMAIL,
         )
+        UserProfile.objects.create(user=self.user)
+
+    def test_allowed_hosts_accept_only_local_development_hosts(self):
+        for host in ("127.0.0.1", "localhost", "192.168.0.95"):
+            with self.subTest(host=host):
+                response = self.client.get(
+                    "/api/accounts/csrf/",
+                    HTTP_HOST=f"{host}:8000",
+                )
+                self.assertEqual(response.status_code, 200)
+
+        rejected_response = self.client.get(
+            "/api/accounts/csrf/",
+            HTTP_HOST="untrusted.example",
+        )
+        self.assertEqual(rejected_response.status_code, 400)
 
     def get_csrf_token(self):
         response = self.client.get("/api/accounts/csrf/")
@@ -752,48 +772,62 @@ class CsrfProtectionTests(TestCase):
                 self.assertEqual(response.status_code, 403)
 
     def test_authentication_posts_accept_csrf_token(self):
-        token = self.get_csrf_token()
-        request_response = self.client.post(
-            "/api/accounts/request-code/",
-            {"email": TEST_EMAIL},
-            HTTP_X_CSRFTOKEN=token,
-            HTTP_ORIGIN="http://127.0.0.1:5173",
-        )
-        self.assertEqual(request_response.status_code, 200)
-
-        login_code = EmailLoginCode.objects.create(
-            email=TEST_EMAIL,
-            code_hash=make_password("123456"),
-            expires_at=timezone.now() + timedelta(minutes=10),
-        )
-        verify_response = self.client.post(
-            "/api/accounts/verify-code/",
-            {"email": TEST_EMAIL, "code": "123456"},
-            HTTP_X_CSRFTOKEN=token,
-            HTTP_ORIGIN="http://127.0.0.1:5173",
+        origins = (
+            "http://127.0.0.1:5173",
+            "http://localhost:5173",
+            "http://192.168.0.95:5173",
         )
 
-        self.assertEqual(verify_response.status_code, 200)
-        self.assertEqual(
-            verify_response.json()["message"],
-            "Login realizado com sucesso.",
-        )
-        self.assertTrue(self.client.session.get("_auth_user_id"))
-        login_code.refresh_from_db()
-        self.assertIsNotNone(login_code.used_at)
+        for origin in origins:
+            with self.subTest(origin=origin):
+                token = self.get_csrf_token()
+                request_response = self.client.post(
+                    "/api/accounts/request-code/",
+                    {"email": TEST_EMAIL},
+                    HTTP_X_CSRFTOKEN=token,
+                    HTTP_ORIGIN=origin,
+                )
+                self.assertEqual(request_response.status_code, 200)
 
-        token = self.get_csrf_token()
-        logout_response = self.client.post(
-            "/api/accounts/logout/",
-            HTTP_X_CSRFTOKEN=token,
-            HTTP_ORIGIN="http://127.0.0.1:5173",
-        )
-        self.assertEqual(logout_response.status_code, 200)
-        self.assertFalse(logout_response.json()["authenticated"])
-        self.assertEqual(
-            self.client.get("/api/accounts/session/").json(),
-            {"authenticated": False},
-        )
+                EmailLoginCode.objects.filter(email=TEST_EMAIL).delete()
+                login_code = EmailLoginCode.objects.create(
+                    email=TEST_EMAIL,
+                    code_hash=make_password("123456"),
+                    expires_at=timezone.now() + timedelta(minutes=10),
+                )
+                verify_response = self.client.post(
+                    "/api/accounts/verify-code/",
+                    {"email": TEST_EMAIL, "code": "123456"},
+                    HTTP_X_CSRFTOKEN=token,
+                    HTTP_ORIGIN=origin,
+                )
+
+                self.assertEqual(verify_response.status_code, 200)
+                self.assertEqual(
+                    verify_response.json()["message"],
+                    "Login realizado com sucesso.",
+                )
+                self.assertTrue(self.client.session.get("_auth_user_id"))
+                self.assertTrue(
+                    self.client.get("/api/accounts/session/").json()[
+                        "authenticated"
+                    ]
+                )
+                login_code.refresh_from_db()
+                self.assertIsNotNone(login_code.used_at)
+
+                token = self.get_csrf_token()
+                logout_response = self.client.post(
+                    "/api/accounts/logout/",
+                    HTTP_X_CSRFTOKEN=token,
+                    HTTP_ORIGIN=origin,
+                )
+                self.assertEqual(logout_response.status_code, 200)
+                self.assertFalse(logout_response.json()["authenticated"])
+                self.assertEqual(
+                    self.client.get("/api/accounts/session/").json(),
+                    {"authenticated": False},
+                )
 
     def test_authentication_posts_reject_untrusted_origin(self):
         token = self.get_csrf_token()

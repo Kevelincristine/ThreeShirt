@@ -1,5 +1,5 @@
 import { useRef, useState, type FormEvent } from "react";
-import { Link } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { Alert } from "../components/feedback/Alert";
 import { Loading } from "../components/feedback/Loading";
 import { useAuth } from "../app/AuthContext";
@@ -9,11 +9,12 @@ import {
   requestLoginCodeForEmail,
 } from "../services/loginCodeRequest";
 
-type LoginStep = "email" | "code" | "session" | "complete";
+type LoginStep = "email" | "code" | "session";
 type LoginAction = "request" | "verify" | "session" | null;
 
 export function StudentLoginPage() {
   const { refreshSession } = useAuth();
+  const navigate = useNavigate();
   const [step, setStep] = useState<LoginStep>("email");
   const [action, setAction] = useState<LoginAction>(null);
   const [email, setEmail] = useState("");
@@ -27,14 +28,19 @@ export function StudentLoginPage() {
     return "Não foi possível concluir a solicitação. Tente novamente.";
   }
 
-  async function confirmSession(successMessage: string): Promise<void> {
+  async function confirmSession(): Promise<void> {
     setAction("session");
     setError("");
     try {
       const session = await refreshSession();
       if (session.status === "authenticated") {
-        setStep("complete");
-        setNotice(successMessage);
+        navigate(
+          session.user.role === "student" ||
+            session.user.role === "student_admin"
+            ? "/student"
+            : "/admin",
+          { replace: true },
+        );
       } else if (session.status === "anonymous") {
         setError(
           "O código foi aceito, mas o servidor não confirmou uma sessão autenticada. Tente verificar novamente.",
@@ -55,7 +61,7 @@ export function StudentLoginPage() {
     if (actionInProgress.current) return;
     actionInProgress.current = true;
     try {
-      await confirmSession("Login realizado com sucesso.");
+      await confirmSession();
     } finally {
       actionInProgress.current = false;
     }
@@ -106,12 +112,12 @@ export function StudentLoginPage() {
     setError("");
     setNotice("");
     try {
-      const response = await verifyLoginCode(
+      await verifyLoginCode(
         email.trim().toLowerCase(),
         code,
       );
       setStep("session");
-      await confirmSession(response.message);
+      await confirmSession();
     } catch (reason) {
       setError(describeError(reason));
     } finally {
@@ -132,9 +138,7 @@ export function StudentLoginPage() {
       </p>
 
       {error && <Alert variant="error">{error}</Alert>}
-      {notice && step !== "complete" && (
-        <Alert variant="info">{notice}</Alert>
-      )}
+      {notice && <Alert variant="info">{notice}</Alert>}
 
       {step === "email" && (
         <form className="login-form" onSubmit={(event) => void sendCode(event)}>
@@ -240,18 +244,6 @@ export function StudentLoginPage() {
         </div>
       )}
 
-      {step === "complete" && (
-        <div className="login-complete">
-          <Alert variant="success">{notice}</Alert>
-          <p>
-            Seu acesso foi confirmado pelo servidor. Você pode seguir para a
-            página inicial.
-          </p>
-          <Link className="button button--primary" to="/">
-            Ir para o início
-          </Link>
-        </div>
-      )}
     </section>
   );
 }

@@ -583,6 +583,11 @@ class ApprovedStudentProposalsApiTests(TestCase):
             "Proposta aprovada",
             ShirtProposal.Status.APPROVED,
         )
+        own_proposal = self.create_proposal(
+            "Proposta própria",
+            ShirtProposal.Status.APPROVED,
+            author=self.student,
+        )
         self.client.force_login(self.student)
 
         response = self.client.get(self.proposals_url)
@@ -590,8 +595,12 @@ class ApprovedStudentProposalsApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["Content-Type"], "application/json")
         self.assertEqual(
-            response.json()["proposals"][0]["id"],
-            proposal.pk,
+            [item["id"] for item in response.json()["proposals"]],
+            [own_proposal.pk, proposal.pk],
+        )
+        self.assertEqual(
+            response.json()["proposals"][0]["author_id"],
+            self.student.pk,
         )
 
     def test_active_admin_can_read_approved_proposals(self):
@@ -605,6 +614,11 @@ class ApprovedStudentProposalsApiTests(TestCase):
             is_staff=True,
         )
         UserProfile.objects.create(user=admin, role=UserProfile.Role.ADMIN)
+        own_proposal = self.create_proposal(
+            "Proposta própria do administrador",
+            ShirtProposal.Status.APPROVED,
+            author=admin,
+        )
         self.client.force_login(admin)
 
         response = self.client.get(self.proposals_url)
@@ -612,10 +626,42 @@ class ApprovedStudentProposalsApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             [item["id"] for item in response.json()["proposals"]],
-            [proposal.pk],
+            [own_proposal.pk, proposal.pk],
         )
         admin.refresh_from_db()
         self.assertFalse(admin.is_superuser)
+
+    def test_student_admin_receives_all_approved_proposals_including_own(self):
+        hybrid = User.objects.create_user(username="approved_proposals_hybrid")
+        UserProfile.objects.create(
+            user=hybrid,
+            role=UserProfile.Role.STUDENT_ADMIN,
+        )
+        other_proposal = self.create_proposal(
+            "Proposta de outro participante",
+            ShirtProposal.Status.APPROVED,
+        )
+        own_proposal = self.create_proposal(
+            "Proposta própria da estudante-admin",
+            ShirtProposal.Status.APPROVED,
+            author=hybrid,
+        )
+        self.client.force_login(hybrid)
+
+        response = self.client.get(self.proposals_url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [item["id"] for item in response.json()["proposals"]],
+            [
+                own_proposal.pk,
+                other_proposal.pk,
+            ],
+        )
+        self.assertEqual(
+            response.json()["proposals"][0]["author_id"],
+            hybrid.pk,
+        )
 
     def test_pending_and_rejected_proposals_are_not_listed(self):
         self.create_proposal(
@@ -663,6 +709,7 @@ class ApprovedStudentProposalsApiTests(TestCase):
             item,
             {
                 "id": proposal.pk,
+                "author_id": proposal.author_id,
                 "title": "Camisa da turma",
                 "description": "Descrição visual de Camisa da turma.",
                 "image_url": reverse("proposal-image", args=[proposal.pk]),
@@ -679,7 +726,7 @@ class ApprovedStudentProposalsApiTests(TestCase):
         self.assertIsInstance(item["related_to_course"], bool)
         self.assertIsInstance(item["additional_colors"], list)
 
-    def test_response_does_not_expose_author_or_internal_image_data(self):
+    def test_response_exposes_only_author_id_and_not_private_author_or_image_data(self):
         proposal = self.create_proposal(
             "Proposta privada",
             ShirtProposal.Status.APPROVED,
@@ -694,6 +741,7 @@ class ApprovedStudentProposalsApiTests(TestCase):
             set(item),
             {
                 "id",
+                "author_id",
                 "title",
                 "description",
                 "image_url",
@@ -710,6 +758,7 @@ class ApprovedStudentProposalsApiTests(TestCase):
             "proposal-author-private@escola.com",
             response.content.decode(),
         )
+        self.assertEqual(item["author_id"], proposal.author_id)
         self.assertNotIn(proposal.image.name, response.content.decode())
 
     def test_results_are_newest_first_with_stable_id_tiebreaker(self):
@@ -917,6 +966,53 @@ class VoteServiceTests(TestCase):
         self.assertEqual(vote.student, self.student)
         self.assertEqual(vote.proposal, self.proposal)
         self.assertEqual(Vote.objects.count(), 1)
+
+    def test_student_cannot_vote_for_own_proposal(self):
+        self.proposal.author = self.student
+        self.proposal.save(update_fields=["author"])
+
+        with self.assertRaisesMessage(
+            ValidationError,
+            "Você não pode votar na sua própria proposta.",
+        ):
+            cast_vote(self.student, self.proposal.pk)
+
+        self.assertEqual(Vote.objects.count(), 0)
+
+    def test_student_admin_cannot_vote_for_any_of_multiple_own_proposals(self):
+        hybrid = User.objects.create_user(username="hybrid_self_voter")
+        UserProfile.objects.create(
+            user=hybrid,
+            role=UserProfile.Role.STUDENT_ADMIN,
+        )
+        own_proposals = [
+            self.proposal,
+            ShirtProposal.objects.create(
+                author=hybrid,
+                title="Outra proposta própria",
+                description="Segunda proposta própria",
+                image="shirt_proposals/another-own.png",
+                base_color="BLACK",
+                related_to_course=True,
+                additional_colors=["BLUE"],
+                has_collar=True,
+                has_phrase=False,
+                phrase_text="",
+                status=ShirtProposal.Status.APPROVED,
+            ),
+        ]
+        self.proposal.author = hybrid
+        self.proposal.save(update_fields=["author"])
+
+        for proposal in own_proposals:
+            with self.subTest(proposal=proposal.pk):
+                with self.assertRaisesMessage(
+                    ValidationError,
+                    "Você não pode votar na sua própria proposta.",
+                ):
+                    cast_vote(hybrid, proposal.pk)
+
+        self.assertEqual(Vote.objects.count(), 0)
 
     def test_student_cannot_vote_twice_through_service(self):
         cast_vote(self.student, self.proposal.pk)
@@ -1672,6 +1768,70 @@ class ElectionResultsTests(TestCase):
             [item["proposal_id"] for item in result["winners"]],
             [self.proposal_a.pk],
         )
+
+    def test_self_votes_are_excluded_while_voting_is_open_and_preserved(self):
+        ElectionSettings.objects.create(voting_open=True)
+        Vote.objects.create(
+            student=self.author,
+            proposal=self.proposal_a,
+        )
+        self.make_vote("valid_open_tally_voter", self.proposal_b)
+
+        result = get_vote_tally()
+
+        self.assertEqual(Vote.objects.count(), 2)
+        self.assertEqual(result["total_votes"], 1)
+        self.assertEqual(self.result_for(result, self.proposal_a)["vote_count"], 0)
+        self.assertEqual(self.result_for(result, self.proposal_b)["vote_count"], 1)
+        self.assertEqual(
+            [item["proposal_id"] for item in result["winners"]],
+            [self.proposal_b.pk],
+        )
+
+    def test_self_votes_are_excluded_until_results_are_released(self):
+        ElectionSettings.objects.create(
+            voting_open=False,
+            results_release_authorized=False,
+        )
+        Vote.objects.create(
+            student=self.author,
+            proposal=self.proposal_a,
+        )
+
+        result = get_vote_tally()
+
+        self.assertEqual(Vote.objects.count(), 1)
+        self.assertEqual(result["total_votes"], 0)
+        self.assertEqual(result["status"], "no_votes")
+
+    def test_released_closed_results_preserve_existing_self_votes(self):
+        ElectionSettings.objects.create(
+            voting_open=False,
+            results_release_authorized=True,
+        )
+        Vote.objects.create(
+            student=self.author,
+            proposal=self.proposal_a,
+        )
+
+        result = get_vote_tally()
+
+        self.assertEqual(Vote.objects.count(), 1)
+        self.assertEqual(result["total_votes"], 1)
+        self.assertEqual(
+            [item["proposal_id"] for item in result["winners"]],
+            [self.proposal_a.pk],
+        )
+
+    def test_self_votes_do_not_change_preference_compatibility(self):
+        response_student = self.make_student("self_vote_compatibility_student")
+        self.make_response(response_student)
+        before_vote = get_compatibility_tally()
+
+        Vote.objects.create(student=self.author, proposal=self.proposal_a)
+        after_vote = get_compatibility_tally()
+
+        self.assertEqual(after_vote, before_vote)
 
     def test_compatibility_is_mean_of_valid_individual_scores(self):
         matching_student = self.make_student("matching_results_student")
@@ -3179,6 +3339,7 @@ class PrivateImageStorageMigrationTests(TestCase):
 @override_settings(ADMIN_EMAILS=["admin@escola.com"])
 class AdminElectionApiPermissionTests(TestCase):
     dashboard_url = "/api/election/admin/dashboard/"
+    progress_url = "/api/election/admin/progress/"
     user_role_url = "/api/election/admin/users/{}/role/"
     user_status_url = "/api/election/admin/users/{}/status/"
 
@@ -3207,6 +3368,63 @@ class AdminElectionApiPermissionTests(TestCase):
         self.assertTrue(response.json()["counts"]["admins_total"])
         self.admin.refresh_from_db()
         self.assertFalse(self.admin.is_superuser)
+
+    def test_admin_vote_indicators_match_open_and_released_tally_rules(self):
+        settings = ElectionSettings.objects.create(voting_open=True)
+        own_proposal = ShirtProposal.objects.create(
+            author=self.student,
+            title="Proposta da estudante",
+            description="Proposta de teste",
+            image="shirt_proposals/admin-count-own.png",
+            base_color="BLACK",
+            related_to_course=True,
+            additional_colors=["BLUE"],
+            has_collar=True,
+            has_phrase=False,
+            phrase_text="",
+            status=ShirtProposal.Status.APPROVED,
+        )
+        other_proposal = ShirtProposal.objects.create(
+            author=self.admin,
+            title="Proposta de outro usuário",
+            description="Proposta de teste",
+            image="shirt_proposals/admin-count-other.png",
+            base_color="BLACK",
+            related_to_course=True,
+            additional_colors=["BLUE"],
+            has_collar=True,
+            has_phrase=False,
+            phrase_text="",
+            status=ShirtProposal.Status.APPROVED,
+        )
+        valid_voter = User.objects.create_user(username="admin_count_valid_voter")
+        UserProfile.objects.create(
+            user=valid_voter,
+            role=UserProfile.Role.STUDENT,
+        )
+        Vote.objects.create(student=self.student, proposal=own_proposal)
+        Vote.objects.create(student=valid_voter, proposal=other_proposal)
+        self.client.force_login(self.admin)
+
+        for endpoint in (self.dashboard_url, self.progress_url):
+            with self.subTest(endpoint=endpoint):
+                response = self.client.get(endpoint)
+                self.assertEqual(response.status_code, 200)
+                if endpoint == self.dashboard_url:
+                    self.assertEqual(response.json()["counts"]["votes_cast"], 1)
+                else:
+                    self.assertEqual(response.json()["total_votes"], 1)
+
+        settings.voting_open = False
+        settings.results_release_authorized = True
+        settings.save(update_fields=["voting_open", "results_release_authorized"])
+        self.assertEqual(Vote.objects.count(), 2)
+
+        dashboard = self.client.get(self.dashboard_url).json()
+        progress = self.client.get(self.progress_url).json()
+        self.assertEqual(dashboard["counts"]["votes_cast"], 2)
+        self.assertEqual(progress["total_votes"], 2)
+        self.assertEqual(Vote.objects.count(), 2)
 
     def test_student_and_anonymous_user_cannot_access_admin_dashboard(self):
         student_response = self.client.get(self.dashboard_url)
@@ -3450,6 +3668,8 @@ class AdminStageControlsApiTests(TestCase):
 
 @override_settings(ADMIN_EMAILS=["api_admin@escola.com"])
 class AdminProposalReviewApiTests(TestCase):
+    proposals_url = "/api/election/admin/proposals/"
+
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
@@ -3484,6 +3704,88 @@ class AdminProposalReviewApiTests(TestCase):
             data=json.dumps({"decision": "approve"}),
             content_type="application/json",
         )
+
+    def create_preferences(self, student, **overrides):
+        data = {
+            "base_color": PreferenceResponse.BaseColor.BLACK,
+            "related_to_course": True,
+            "wants_animal": True,
+            "preferred_animal": "Lobo",
+            "preferred_colors": ["BLUE", "RED"],
+            "wants_collar": False,
+            "wants_phrase": True,
+            "intends_to_buy": True,
+        }
+        data.update(overrides)
+        return PreferenceResponse.objects.create(student=student, **data)
+
+    def test_admin_proposal_list_returns_preferences_for_exact_author(self):
+        another_author = User.objects.create_user(username="second_review_author")
+        UserProfile.objects.create(
+            user=another_author,
+            role=UserProfile.Role.STUDENT,
+        )
+        another_proposal = submit_shirt_proposal(
+            another_author,
+            make_proposal_data(),
+        )
+        first_preferences = self.create_preferences(self.author)
+        second_preferences = self.create_preferences(
+            another_author,
+            base_color=PreferenceResponse.BaseColor.WHITE,
+            related_to_course=False,
+            wants_animal=False,
+            preferred_animal="",
+            preferred_colors=["GREEN"],
+            wants_collar=True,
+            wants_phrase=False,
+            intends_to_buy=False,
+        )
+
+        response = self.client.get(self.proposals_url)
+
+        self.assertEqual(response.status_code, 200)
+        items = {
+            item["id"]: item for item in response.json()["proposals"]
+        }
+        self.assertEqual(
+            items[self.proposal.pk]["preferences"],
+            {
+                "base_color": first_preferences.base_color,
+                "related_to_course": True,
+                "wants_animal": True,
+                "preferred_animal": "Lobo",
+                "preferred_colors": ["BLUE", "RED"],
+                "wants_collar": False,
+                "wants_phrase": True,
+                "intends_to_buy": True,
+            },
+        )
+        self.assertEqual(
+            items[another_proposal.pk]["preferences"],
+            {
+                "base_color": second_preferences.base_color,
+                "related_to_course": False,
+                "wants_animal": False,
+                "preferred_animal": "",
+                "preferred_colors": ["GREEN"],
+                "wants_collar": True,
+                "wants_phrase": False,
+                "intends_to_buy": False,
+            },
+        )
+
+    def test_admin_proposal_list_marks_missing_preferences_and_is_admin_only(self):
+        response = self.client.get(self.proposals_url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.json()["proposals"][0]["preferences"])
+
+        self.client.force_login(self.author)
+        student_response = self.client.get(self.proposals_url)
+
+        self.assertEqual(student_response.status_code, 403)
+        self.assertNotIn("preferences", student_response.json())
 
     def test_hybrid_can_review_but_review_is_blocked_during_voting(self):
         ElectionSettings.objects.create(
@@ -3754,6 +4056,78 @@ class StudentElectionActionApiTests(TestCase):
         self.assertEqual(duplicate.status_code, 400)
         self.assertEqual(Vote.objects.filter(student=self.student).count(), 1)
 
+        admin = User.objects.create_user(username="action_api_pure_admin")
+        UserProfile.objects.create(user=admin, role=UserProfile.Role.ADMIN)
+        self.client.force_login(admin)
+        admin_attempt = self.client.post(
+            self.vote_url,
+            data=json.dumps({"proposal_id": proposal.pk}),
+            content_type="application/json",
+        )
+        self.assertEqual(admin_attempt.status_code, 403)
+        self.assertEqual(Vote.objects.count(), 1)
+
+    def test_vote_api_rejects_direct_attempt_to_vote_for_own_proposal(self):
+        own_proposal = ShirtProposal.objects.create(
+            author=self.student,
+            title="Proposta própria",
+            description="Não pode receber o voto do próprio autor.",
+            image="shirt_proposals/own-api-proposal.png",
+            base_color="BLACK",
+            related_to_course=True,
+            additional_colors=["BLUE"],
+            has_collar=True,
+            has_phrase=False,
+            phrase_text="",
+            status=ShirtProposal.Status.APPROVED,
+        )
+        ElectionSettings.objects.create(
+            voting_open=True,
+            voting_started_at=timezone.now(),
+        )
+        self.client.force_login(self.student)
+
+        response = self.client.post(
+            self.vote_url,
+            data=json.dumps({"proposal_id": own_proposal.pk}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(
+            "Você não pode votar na sua própria proposta.",
+            response.json()["fields"]["proposal"],
+        )
+        self.assertFalse(Vote.objects.filter(student=self.student).exists())
+
+    def test_student_admin_vote_api_rejects_own_proposal(self):
+        hybrid = User.objects.create_user(username="hybrid_direct_self_voter")
+        UserProfile.objects.create(
+            user=hybrid,
+            role=UserProfile.Role.STUDENT_ADMIN,
+        )
+        own_proposal = self.create_proposal()
+        own_proposal.author = hybrid
+        own_proposal.save(update_fields=["author"])
+        ElectionSettings.objects.create(
+            voting_open=True,
+            voting_started_at=timezone.now(),
+        )
+        self.client.force_login(hybrid)
+
+        response = self.client.post(
+            self.vote_url,
+            data=json.dumps({"proposal_id": own_proposal.pk}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(
+            "Você não pode votar na sua própria proposta.",
+            response.json()["fields"]["proposal"],
+        )
+        self.assertFalse(Vote.objects.filter(student=hybrid).exists())
+
     def test_results_api_requires_release_and_closed_voting_and_returns_aggregates(self):
         proposal = self.create_proposal()
         response = self.client.get(self.results_url)
@@ -3793,6 +4167,79 @@ class StudentElectionActionApiTests(TestCase):
         self.assertEqual(response.json()["status"], "no_votes")
         self.assertEqual(response.json()["total_votes"], 0)
         self.assertEqual(response.json()["winners"], [])
+
+    def test_results_include_proposal_image_and_all_survey_aggregates(self):
+        proposal = self.create_proposal()
+        PreferenceResponse.objects.create(
+            student=self.student,
+            **self.preference_data(),
+        )
+        second_student = User.objects.create_user(
+            username="survey_results_student",
+            email="survey_results_student@escola.com",
+        )
+        UserProfile.objects.create(
+            user=second_student,
+            role=UserProfile.Role.STUDENT,
+        )
+        PreferenceResponse.objects.create(
+            student=second_student,
+            **self.preference_data(
+                base_color="WHITE",
+                related_to_course=False,
+                wants_animal=True,
+                preferred_animal="Gato",
+                preferred_colors=[],
+                wants_collar=False,
+                wants_phrase=True,
+                intends_to_buy=False,
+            ),
+        )
+        ElectionSettings.objects.create(results_release_authorized=True)
+        self.client.force_login(self.student)
+
+        response = self.client.get(self.results_url)
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(
+            data["proposals"][0]["image_url"],
+            f"/proposals/{proposal.pk}/image/",
+        )
+        survey = data["survey_results"]
+        self.assertEqual(survey["respondent_count"], 2)
+        self.assertEqual(len(survey["questions"]), 8)
+        questions = {
+            question["id"]: question for question in survey["questions"]
+        }
+        self.assertEqual(
+            questions["base_color"]["options"],
+            [
+                {
+                    "value": "BLACK",
+                    "label": "Preta",
+                    "response_count": 1,
+                    "percentage": "50",
+                },
+                {
+                    "value": "WHITE",
+                    "label": "Branca",
+                    "response_count": 1,
+                    "percentage": "50",
+                },
+            ],
+        )
+        animal_question = questions["preferred_animal"]
+        self.assertEqual(animal_question["respondent_count"], 1)
+        self.assertEqual(animal_question["options"][0]["label"], "Gato")
+        self.assertEqual(animal_question["options"][0]["percentage"], "100")
+        color_options = {
+            option["value"]: option
+            for option in questions["preferred_colors"]["options"]
+        }
+        self.assertEqual(len(color_options), 10)
+        self.assertEqual(color_options["RED"]["response_count"], 0)
+        self.assertEqual(color_options["RED"]["percentage"], "0")
 
     def test_student_admin_can_complete_student_participation_flow(self):
         hybrid = User.objects.create_user(
@@ -3837,6 +4284,10 @@ class StudentElectionActionApiTests(TestCase):
         self.assertEqual(
             [item["id"] for item in approved_gallery.json()["proposals"]],
             [approved.pk],
+        )
+        self.assertEqual(
+            approved_gallery.json()["proposals"][0]["author_id"],
+            approved.author_id,
         )
         settings = ElectionSettings.objects.get(pk=1)
         settings.survey_open = False
@@ -3888,10 +4339,11 @@ class StudentElectionActionApiTests(TestCase):
             proposal = ShirtProposal.objects.get(pk=proposal_id)
             proposal.status = ShirtProposal.Status.APPROVED
             proposal.save(update_fields=["status"])
+            proposal_from_another_student = self.create_proposal()
             gallery = self.client.get("/api/election/student/proposals/")
             self.assertEqual(
                 [item["id"] for item in gallery.json()["proposals"]],
-                [proposal_id],
+                [proposal_from_another_student.pk, proposal_id],
             )
 
             ElectionSettings.objects.filter(pk=1).update(
@@ -3901,7 +4353,9 @@ class StudentElectionActionApiTests(TestCase):
             )
             vote_response = self.client.post(
                 self.vote_url,
-                data=json.dumps({"proposal_id": proposal_id}),
+                data=json.dumps({
+                    "proposal_id": proposal_from_another_student.pk,
+                }),
                 content_type="application/json",
             )
             self.assertEqual(vote_response.status_code, 200)
@@ -3917,7 +4371,7 @@ class StudentElectionActionApiTests(TestCase):
             self.assertEqual(results.json()["total_votes"], 1)
             self.assertEqual(
                 results.json()["winners"][0]["proposal_id"],
-                proposal_id,
+                proposal_from_another_student.pk,
             )
 
             logout_response = self.client.post("/api/accounts/logout/")

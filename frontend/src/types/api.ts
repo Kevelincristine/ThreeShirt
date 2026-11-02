@@ -62,6 +62,7 @@ export interface StudentPreferencesResponse {
 
 export interface StudentProposal {
   id: number;
+  author_id: number;
   title: string;
   description: string;
   image_url: string;
@@ -87,10 +88,30 @@ export interface StudentSubmission {
 export interface StudentResultsProposal {
   proposal_id: number;
   title: string;
+  image_url: string;
   vote_count: number;
   percentage: number | null;
   compatibility: number | null;
   valid_assessments: number;
+}
+
+export interface StudentSurveyOption {
+  value: string;
+  label: string;
+  response_count: number;
+  percentage: number | null;
+}
+
+export interface StudentSurveyQuestion {
+  id: string;
+  question: string;
+  respondent_count: number;
+  options: StudentSurveyOption[];
+}
+
+export interface StudentSurveyResults {
+  respondent_count: number;
+  questions: StudentSurveyQuestion[];
 }
 
 export interface StudentResultsResponse {
@@ -99,6 +120,7 @@ export interface StudentResultsResponse {
   proposals: StudentResultsProposal[];
   winners: Array<Pick<StudentResultsProposal, "proposal_id" | "title" | "vote_count" | "percentage">>;
   is_tie: boolean;
+  survey_results: StudentSurveyResults;
   compatibility_status: "available" | "insufficient_data";
   compatibility_winners: Array<{
     proposal_id: number;
@@ -139,6 +161,17 @@ export interface AdminProposalAuthor {
   full_name: string;
 }
 
+export interface AdminProposalPreferences {
+  base_color: "BLACK" | "WHITE";
+  related_to_course: boolean;
+  wants_animal: boolean;
+  preferred_animal: string;
+  preferred_colors: string[];
+  wants_collar: boolean;
+  wants_phrase: boolean;
+  intends_to_buy: boolean;
+}
+
 export interface AdminProposal {
   id: number;
   title: string;
@@ -155,6 +188,7 @@ export interface AdminProposal {
   reviewed_at: string | null;
   rejection_reason: string;
   image_url: string;
+  preferences: AdminProposalPreferences | null;
   author: AdminProposalAuthor;
   reviewed_by: AdminProposalAuthor | null;
 }

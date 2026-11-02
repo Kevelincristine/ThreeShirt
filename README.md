@@ -193,7 +193,7 @@ Crie `threeshirt\.env` localmente. Não compartilhe nem versione esse arquivo:
 DJANGO_SECRET_KEY=use-uma-chave-aleatoria-local
 THREESHIRT_ALLOWED_EMAILS=admin@exemplo.com
 THREESHIRT_ADMIN_EMAILS=admin@exemplo.com
-THREESHIRT_CSRF_TRUSTED_ORIGINS=http://127.0.0.1:5173
+THREESHIRT_CSRF_TRUSTED_ORIGINS=http://127.0.0.1:5173,http://localhost:5173,http://192.168.0.95:5173
 ```
 
 Cadastre a conta administrativa inicial com um e-mail incluído nas duas
@@ -241,11 +241,16 @@ npm --prefix .\frontend ci
 npm --prefix .\frontend run dev
 ```
 
-Abra o endereço indicado pelo Vite (por padrão,
-`http://127.0.0.1:5173/`). O servidor de desenvolvimento encaminha, sem
+Abra `http://127.0.0.1:5173/` ou `http://localhost:5173/` no computador.
+Para acessar pela rede Wi-Fi, abra `http://192.168.0.95:5173/` no tablet.
+O servidor de desenvolvimento escuta conexões da rede local e encaminha, sem
 reescrever, `/api/*` e `/proposals/*` ao Django em
 `http://127.0.0.1:8000`. Execute o backend separadamente, na pasta
-`threeshirt`, com `python manage.py runserver 127.0.0.1:8000`.
+`threeshirt`, com `python manage.py runserver 127.0.0.1:8000`; ele permanece
+acessível somente pelo computador, pois o proxy do Vite encaminha as chamadas.
+Se a porta `5173` já estiver ocupada, encerre o servidor anterior antes de
+iniciar o Vite; ele não mudará de porta para evitar uma origem fora da lista
+CSRF autorizada.
 
 Verifique o frontend com:
 
@@ -259,8 +264,9 @@ O login solicita um código e verifica-o por meio das views Django existentes.
 Antes de cada POST, o cliente busca um token CSRF em
 `/api/accounts/csrf/`, envia-o no cabeçalho `X-CSRFToken` e inclui cookies de
 sessão. O proxy de desenvolvimento não contorna o `CsrfViewMiddleware`.
-Configure `THREESHIRT_CSRF_TRUSTED_ORIGINS` para as origens exatas necessárias
-em cada ambiente; não inclua a origem local do Vite em produção por padrão.
+Configure `THREESHIRT_CSRF_TRUSTED_ORIGINS` com as origens exatas necessárias
+em cada ambiente. Em desenvolvimento local, permita as três origens mostradas
+no exemplo; em produção, não inclua as origens do Vite.
 O login só informa sucesso quando a verificação real retorna HTTP 200.
 `GET /api/accounts/session/` consulta a sessão atual: retorna HTTP 200
 com `{"authenticated": false}` para visitantes; para usuários autenticados,

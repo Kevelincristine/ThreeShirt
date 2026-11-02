@@ -67,8 +67,8 @@ export function StudentDashboardPage() {
       className="student-dashboard"
     >
       <header className="paper-panel student-dashboard__intro">
-        <p className="eyebrow">Caderno da turma</p>
-        <h1 id="student-dashboard-title">Painel do estudante</h1>
+        <p className="eyebrow">ThreeShirt · vamos escolher juntos nosso futuro</p>
+        <h1 id="student-dashboard-title">Painel</h1>
         <p>
           {isAdmin
             ? "Consulte as informações gerais da pesquisa e da votação."
@@ -103,7 +103,7 @@ export function StudentDashboardPage() {
           >
             <DashboardCard
               description="Estado informado pelo sistema."
-              title="Pesquisa de preferências"
+              title="Pesquisa"
               value={state.dashboard.survey_open ? "Aberta" : "Fechada"}
             />
             <DashboardCard
@@ -124,7 +124,7 @@ export function StudentDashboardPage() {
               <>
                 <DashboardCard
                   description="Consulta referente à sua conta."
-                  title="Suas preferências"
+                  title="Sua pesquisa"
                   value={
                     state.dashboard.has_preferences
                       ? "Resposta registrada"
@@ -150,7 +150,7 @@ export function StudentDashboardPage() {
               </Link>
             ) : (
               <>
-                <Link className="button button--primary" to="/student/preferences">
+                <Link className="button button--primary" to="/student/survey">
                   Responder pesquisa
                 </Link>
                 <Link className="button button--secondary" to="/student/proposals">

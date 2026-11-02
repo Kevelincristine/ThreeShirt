@@ -84,6 +84,7 @@ test("proposal submission sends multipart form data with CSRF and approved list 
     return mockResponse({
       proposals: [{
         id: 3,
+        author_id: 44,
         title: "Aprovada",
         description: "Design autorizado.",
         image_url: "/proposals/3/image/",
@@ -108,7 +109,77 @@ test("proposal submission sends multipart form data with CSRF and approved list 
     assert.equal(calls[0].init.headers.has("Content-Type"), false);
     assert.equal(approved.length, 1);
     assert.equal(approved[0].title, "Aprovada");
+    assert.equal(approved[0].author_id, 44);
     assert.equal(calls[1].url, "http://localhost:5173/api/election/student/proposals/");
+  } finally {
+    restore();
+  }
+});
+
+test("admin proposal parser preserves nullable survey answers and multiple-choice values", async () => {
+  const restore = setFetch(async () => mockResponse({
+    proposals: [{
+      id: 12,
+      title: "Proposta em revisão",
+      description: "Descrição do design.",
+      status: "PENDING",
+      base_color: "BLACK",
+      animal: "",
+      additional_colors: [],
+      has_collar: false,
+      has_phrase: false,
+      phrase_text: "",
+      created_at: "2026-11-02T10:00:00-03:00",
+      updated_at: "2026-11-02T10:00:00-03:00",
+      reviewed_at: null,
+      rejection_reason: "",
+      image_url: "/proposals/12/image/",
+      preferences: {
+        base_color: "WHITE",
+        related_to_course: true,
+        wants_animal: true,
+        preferred_animal: "Raposa",
+        preferred_colors: ["BLUE", "RED"],
+        wants_collar: false,
+        wants_phrase: true,
+        intends_to_buy: false,
+      },
+      author: { id: 9, email: "author@school.test", full_name: "Autor" },
+      reviewed_by: null,
+    }, {
+      id: 13,
+      title: "Sem respostas",
+      description: "Outra descrição.",
+      status: "PENDING",
+      base_color: "WHITE",
+      animal: "",
+      additional_colors: [],
+      has_collar: false,
+      has_phrase: false,
+      phrase_text: "",
+      created_at: "2026-11-02T10:00:00-03:00",
+      updated_at: "2026-11-02T10:00:00-03:00",
+      reviewed_at: null,
+      rejection_reason: "",
+      image_url: "/proposals/13/image/",
+      preferences: null,
+      author: { id: 10, email: "other@school.test", full_name: "Outra pessoa" },
+      reviewed_by: null,
+    }],
+  }));
+  try {
+    const proposals = await api.getAdminProposals();
+    assert.deepEqual(proposals[0].preferences, {
+      base_color: "WHITE",
+      related_to_course: true,
+      wants_animal: true,
+      preferred_animal: "Raposa",
+      preferred_colors: ["BLUE", "RED"],
+      wants_collar: false,
+      wants_phrase: true,
+      intends_to_buy: false,
+    });
+    assert.equal(proposals[1].preferences, null);
   } finally {
     restore();
   }
@@ -147,6 +218,7 @@ test("student results parse decimal strings as aggregates without individual rec
     proposals: [{
       proposal_id: 4,
       title: "Design finalista",
+      image_url: "/proposals/4/image/",
       vote_count: 2,
       percentage: "100",
       compatibility: "85.25",
@@ -159,6 +231,20 @@ test("student results parse decimal strings as aggregates without individual rec
       percentage: "100",
     }],
     is_tie: false,
+    survey_results: {
+      respondent_count: 1,
+      questions: [{
+        id: "base_color",
+        question: "Cor-base preferida",
+        respondent_count: 1,
+        options: [{
+          value: "BLACK",
+          label: "Preta",
+          response_count: 1,
+          percentage: "100",
+        }],
+      }],
+    },
     compatibility_status: "available",
     compatibility_winners: [{
       proposal_id: 4,
@@ -173,6 +259,8 @@ test("student results parse decimal strings as aggregates without individual rec
     const results = await api.getStudentResults();
     assert.equal(results.proposals[0].percentage, 100);
     assert.equal(results.proposals[0].compatibility, 85.25);
+    assert.equal(results.proposals[0].image_url, "/proposals/4/image/");
+    assert.equal(results.survey_results.questions[0].options[0].percentage, 100);
     assert.equal(results.total_votes, 2);
     assert.equal("student" in results.proposals[0], false);
   } finally {

@@ -43,6 +43,7 @@ from .models import (
 from .services import (
     get_approved_proposals,
     get_compatibility_tally,
+    get_preference_tally,
     get_preference_response,
     get_vote_tally,
     is_results_release_authorized,
@@ -582,6 +583,7 @@ def admin_dashboard(request):
             ShirtProposal.Status.REJECTED,
         )
     }
+    vote_tally = get_vote_tally()
 
     return JsonResponse({
         "survey_open": bool(settings and settings.survey_open),
@@ -600,7 +602,7 @@ def admin_dashboard(request):
             "proposals_approved": proposal_counts[ShirtProposal.Status.APPROVED],
             "proposals_rejected": proposal_counts[ShirtProposal.Status.REJECTED],
             "preferences_responses": responses,
-            "votes_cast": Vote.objects.count(),
+            "votes_cast": vote_tally["total_votes"],
             "admins_total": User.objects.filter(
                 is_active=True,
                 profile__role__in=UserProfile.ADMIN_ROLES,
@@ -631,11 +633,17 @@ def admin_proposals(request):
     proposals = ShirtProposal.objects.select_related(
         "author",
         "author__profile",
+        "author__preference_response",
         "reviewed_by",
         "reviewed_by__profile",
     ).order_by("-created_at")
     payload = []
     for proposal in proposals:
+        try:
+            preferences = proposal.author.preference_response
+        except PreferenceResponse.DoesNotExist:
+            preferences = None
+
         payload.append({
             "id": proposal.pk,
             "title": proposal.title,
@@ -654,6 +662,20 @@ def admin_proposals(request):
             ),
             "rejection_reason": proposal.rejection_reason,
             "image_url": reverse("proposal-image", args=[proposal.pk]),
+            "preferences": (
+                {
+                    "base_color": preferences.base_color,
+                    "related_to_course": preferences.related_to_course,
+                    "wants_animal": preferences.wants_animal,
+                    "preferred_animal": preferences.preferred_animal,
+                    "preferred_colors": preferences.preferred_colors,
+                    "wants_collar": preferences.wants_collar,
+                    "wants_phrase": preferences.wants_phrase,
+                    "intends_to_buy": preferences.intends_to_buy,
+                }
+                if preferences is not None
+                else None
+            ),
             "author": {
                 "id": proposal.author_id,
                 "email": proposal.author.email,
@@ -1328,6 +1350,7 @@ def admin_progress(request):
             ShirtProposal.Status.REJECTED,
         )
     }
+    vote_tally = get_vote_tally()
     return JsonResponse({
         "students_total": active_students,
         "students_active": active_students,
@@ -1339,7 +1362,7 @@ def admin_progress(request):
         ),
         "proposal_counts": proposal_counts,
         "voting_open": bool(settings and settings.voting_open),
-        "total_votes": Vote.objects.count(),
+        "total_votes": vote_tally["total_votes"],
     })
 
 
@@ -1406,7 +1429,10 @@ def approved_student_proposals(request):
             ShirtProposal.objects.filter(
                 status=ShirtProposal.Status.APPROVED,
             ).order_by("-created_at", "-pk")
-            if _is_active_admin_user(request.user)
+            if (
+                _is_active_admin_user(request.user)
+                and not _is_authorized_student(request.user)
+            )
             else get_approved_proposals(request.user)
         )
     except PermissionDenied:
@@ -1438,6 +1464,7 @@ def approved_student_proposals(request):
                 "has_collar": proposal.has_collar,
                 "has_phrase": proposal.has_phrase,
                 "phrase_text": proposal.phrase_text,
+                "author_id": proposal.author_id,
             }
             for proposal in proposals
         ],
@@ -1644,9 +1671,14 @@ def student_results(request):
             compatibility = compatibility_by_proposal[result["proposal_id"]]
             proposals.append({
                 **result,
+                "image_url": reverse(
+                    "proposal-image",
+                    args=[result["proposal_id"]],
+                ),
                 "compatibility": compatibility["average_compatibility"],
                 "valid_assessments": compatibility["valid_assessments"],
             })
+        preference_tally = get_preference_tally()
     except PermissionDenied:
         return JsonResponse(
             {"error": "Acesso permitido apenas a estudantes ativos."},
@@ -1665,6 +1697,7 @@ def student_results(request):
         "proposals": proposals,
         "winners": vote_tally["winners"],
         "is_tie": vote_tally["is_tie"],
+        "survey_results": preference_tally,
         "compatibility_status": compatibility_tally["status"],
         "compatibility_winners": compatibility_tally["winners"],
         "compatibility_is_tie": compatibility_tally["is_tie"],

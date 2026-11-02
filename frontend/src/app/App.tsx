@@ -3,6 +3,7 @@ import { Link, Outlet, useNavigate } from "react-router-dom";
 import { Alert } from "../components/feedback/Alert";
 import { Header } from "../components/layout/Header";
 import { Navbar } from "../components/layout/Navbar";
+import { ConfirmationModal } from "../components/modals/ConfirmationModal";
 import { useAuth } from "./AuthContext";
 
 export function App() {
@@ -10,6 +11,7 @@ export function App() {
   const navigate = useNavigate();
   const [logoutPending, setLogoutPending] = useState(false);
   const [logoutError, setLogoutError] = useState("");
+  const [logoutConfirmationOpen, setLogoutConfirmationOpen] = useState(false);
   const isAuthenticated = state.status === "authenticated";
   const isStudent =
     isAuthenticated &&
@@ -44,11 +46,13 @@ export function App() {
       >
         <Navbar
           links={[
-            { href: "/", label: "Início" },
+            ...(state.status === "authenticated"
+              ? []
+              : [{ href: "/", label: "Início" }]),
             ...(isStudent
               ? [
                   { href: "/student", label: "Painel" },
-                  { href: "/student/preferences", label: "Preferências" },
+                  { href: "/student/survey", label: "Pesquisa" },
                   { href: "/student/proposals", label: "Propostas" },
                   { href: "/student/gallery", label: "Galeria e votação" },
                   { href: "/student/results", label: "Resultados" },
@@ -71,7 +75,7 @@ export function App() {
             state.status === "authenticated"
               ? {
                   label: logoutPending ? "Saindo..." : "Sair",
-                  onClick: () => void handleLogout(),
+                  onClick: () => setLogoutConfirmationOpen(true),
                   disabled: logoutPending,
                 }
               : undefined
@@ -82,6 +86,18 @@ export function App() {
         {logoutError && <Alert variant="error">{logoutError}</Alert>}
         <Outlet />
       </main>
+      <ConfirmationModal
+        cancelLabel="Continuar conectado"
+        confirmLabel={logoutPending ? "Saindo..." : "Sair"}
+        isOpen={logoutConfirmationOpen}
+        message="Deseja encerrar sua sessão no ThreeShirt?"
+        onCancel={() => setLogoutConfirmationOpen(false)}
+        onConfirm={() => {
+          setLogoutConfirmationOpen(false);
+          void handleLogout();
+        }}
+        title="Confirmar saída"
+      />
       <footer className="site-footer">
         <p>ThreeShirt · criação coletiva da turma</p>
       </footer>

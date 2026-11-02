@@ -36,13 +36,22 @@ AUTHORIZED_LOGIN_EMAILS = [
 # Segurança.
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "")
 DEBUG = True
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = [
+    "127.0.0.1",
+    "localhost",
+    "192.168.0.95",
+]
 
+_default_csrf_trusted_origins = [
+    "http://127.0.0.1:5173",
+    "http://localhost:5173",
+    "http://192.168.0.95:5173",
+]
 _csrf_trusted_origins_setting = os.getenv(
     "THREESHIRT_CSRF_TRUSTED_ORIGINS",
-    "",
+    ",".join(_default_csrf_trusted_origins),
 ).strip()
-CSRF_TRUSTED_ORIGINS = []
+CSRF_TRUSTED_ORIGINS = _default_csrf_trusted_origins
 if _csrf_trusted_origins_setting:
     _csrf_trusted_origins = [
         origin.strip()

@@ -1,6 +1,6 @@
 import { Alert } from "../components/feedback/Alert";
 import { Loading } from "../components/feedback/Loading";
-import { Link } from "react-router-dom";
+import { Link, Navigate } from "react-router-dom";
 import { useAuth } from "../app/AuthContext";
 
 export function HomePage() {
@@ -11,6 +11,12 @@ export function HomePage() {
   const isAdmin =
     state.status === "authenticated" &&
     (state.user.role === "admin" || state.user.role === "student_admin");
+  if (
+    state.status === "authenticated" &&
+    (state.user.role === "student" || state.user.role === "student_admin")
+  ) {
+    return <Navigate replace to="/student" />;
+  }
   const roleLabel = state.status !== "authenticated"
     ? ""
     : state.user.role === "student_admin"
@@ -19,7 +25,7 @@ export function HomePage() {
 
   return (
     <section aria-labelledby="home-title" className="paper-panel">
-      <p className="eyebrow">ThreeShirt · um projeto da turma</p>
+      <p className="eyebrow">ThreeShirt · vamos escolher juntos nosso futuro</p>
       <h1 id="home-title">Um espaço para a turma criar junto.</h1>
       {state.status === "loading" && (
         <Loading label="Verificando sua sessão..." />
@@ -40,14 +46,6 @@ export function HomePage() {
           <p>
             Boas-vindas! Você está autenticado como {roleLabel}.
           </p>
-          {(isStudent || isAdmin) && (
-            <Link
-              className="button button--primary login-home-link"
-              to="/student"
-            >
-              Abrir painel do estudante
-            </Link>
-          )}
           {isAdmin && (
             <>
               <Link

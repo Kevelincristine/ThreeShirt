@@ -5,6 +5,7 @@ import type {
   AdminMaintenancePreview,
   AdminMaintenanceResult,
   AdminProposal,
+  AdminProposalPreferences,
   AdminUser,
   ApiMessageResponse,
   AuthenticatedSession,
@@ -193,6 +194,35 @@ function getStudentPreferencesResponse(
     throw new ApiError("As preferências recebidas são inválidas.", 200);
 }
 
+function getAdminProposalPreferences(
+  value: unknown,
+): AdminProposalPreferences | null {
+  if (value === null) return null;
+  if (
+    isRecord(value) &&
+    (value.base_color === "BLACK" || value.base_color === "WHITE") &&
+    typeof value.related_to_course === "boolean" &&
+    typeof value.wants_animal === "boolean" &&
+    typeof value.preferred_animal === "string" &&
+    isStringArray(value.preferred_colors) &&
+    typeof value.wants_collar === "boolean" &&
+    typeof value.wants_phrase === "boolean" &&
+    typeof value.intends_to_buy === "boolean"
+  ) {
+    return {
+      base_color: value.base_color,
+      related_to_course: value.related_to_course,
+      wants_animal: value.wants_animal,
+      preferred_animal: value.preferred_animal,
+      preferred_colors: value.preferred_colors,
+      wants_collar: value.wants_collar,
+      wants_phrase: value.wants_phrase,
+      intends_to_buy: value.intends_to_buy,
+    };
+  }
+  throw new ApiError("As preferências da proposta são inválidas.", 200);
+}
+
 function getApprovedProposals(data: unknown): StudentProposal[] {
     if (!isRecord(data) || !Array.isArray(data.proposals)) {
       throw new ApiError("A galeria recebida é inválida.", 200);
@@ -201,6 +231,7 @@ function getApprovedProposals(data: unknown): StudentProposal[] {
       if (
         !isRecord(proposal) ||
         typeof proposal.id !== "number" ||
+        typeof proposal.author_id !== "number" ||
         typeof proposal.title !== "string" ||
         typeof proposal.description !== "string" ||
         typeof proposal.image_url !== "string" ||
@@ -216,6 +247,7 @@ function getApprovedProposals(data: unknown): StudentProposal[] {
       }
       return {
         id: proposal.id,
+        author_id: proposal.author_id,
         title: proposal.title,
         description: proposal.description,
         image_url: proposal.image_url,
@@ -276,6 +308,9 @@ function parseStudentResults(data: unknown): StudentResultsResponse {
       !Array.isArray(data.proposals) ||
       !Array.isArray(data.winners) ||
       typeof data.is_tie !== "boolean" ||
+      !isRecord(data.survey_results) ||
+      typeof data.survey_results.respondent_count !== "number" ||
+      !Array.isArray(data.survey_results.questions) ||
       (data.compatibility_status !== "available" &&
         data.compatibility_status !== "insufficient_data") ||
       !Array.isArray(data.compatibility_winners) ||
@@ -289,6 +324,8 @@ function parseStudentResults(data: unknown): StudentResultsResponse {
         !isRecord(item) ||
         typeof item.proposal_id !== "number" ||
         typeof item.title !== "string" ||
+        typeof item.image_url !== "string" ||
+        item.image_url.trim().length === 0 ||
         typeof item.vote_count !== "number" ||
         typeof item.valid_assessments !== "number"
       ) {
@@ -297,6 +334,7 @@ function parseStudentResults(data: unknown): StudentResultsResponse {
       return {
         proposal_id: item.proposal_id,
         title: item.title,
+        image_url: item.image_url,
         vote_count: item.vote_count,
         percentage: getNumberOrNull(item.percentage),
         compatibility: getNumberOrNull(item.compatibility),
@@ -319,6 +357,24 @@ function parseStudentResults(data: unknown): StudentResultsResponse {
         percentage: getNumberOrNull(item.percentage),
       };
     });
+    if (
+      winners.some((winner) => {
+        const proposal = proposals.find(
+          (item) => item.proposal_id === winner.proposal_id,
+        );
+        return (
+          !proposal ||
+          proposal.title !== winner.title ||
+          proposal.vote_count !== winner.vote_count ||
+          proposal.percentage !== winner.percentage
+        );
+      })
+    ) {
+      throw new ApiError(
+        "A proposta vencedora não corresponde à apuração recebida.",
+        200,
+      );
+    }
     const compatibilityWinners = data.compatibility_winners.map((item) => {
       if (
         !isRecord(item) ||
@@ -339,6 +395,59 @@ function parseStudentResults(data: unknown): StudentResultsResponse {
         status,
       };
     });
+    if (
+      compatibilityWinners.some((winner) => {
+        const proposal = proposals.find(
+          (item) => item.proposal_id === winner.proposal_id,
+        );
+        return (
+          winner.status !== "available" ||
+          winner.average_compatibility === null ||
+          !proposal ||
+          proposal.title !== winner.title ||
+          proposal.valid_assessments !== winner.valid_assessments ||
+          proposal.compatibility !== winner.average_compatibility
+        );
+      })
+    ) {
+      throw new ApiError(
+        "A proposta com maior compatibilidade não corresponde aos resultados recebidos.",
+        200,
+      );
+    }
+    const surveyQuestions = data.survey_results.questions.map((item) => {
+      if (
+        !isRecord(item) ||
+        typeof item.id !== "string" ||
+        typeof item.question !== "string" ||
+        typeof item.respondent_count !== "number" ||
+        !Array.isArray(item.options)
+      ) {
+        throw new ApiError("Uma pergunta da pesquisa recebida é inválida.", 200);
+      }
+      const options = item.options.map((option) => {
+        if (
+          !isRecord(option) ||
+          typeof option.value !== "string" ||
+          typeof option.label !== "string" ||
+          typeof option.response_count !== "number"
+        ) {
+          throw new ApiError("Uma opção da pesquisa recebida é inválida.", 200);
+        }
+        return {
+          value: option.value,
+          label: option.label,
+          response_count: option.response_count,
+          percentage: getNumberOrNull(option.percentage),
+        };
+      });
+      return {
+        id: item.id,
+        question: item.question,
+        respondent_count: item.respondent_count,
+        options,
+      };
+    });
 
     return {
       status: data.status,
@@ -346,6 +455,10 @@ function parseStudentResults(data: unknown): StudentResultsResponse {
       proposals,
       winners,
       is_tie: data.is_tie,
+      survey_results: {
+        respondent_count: data.survey_results.respondent_count,
+        questions: surveyQuestions,
+      },
       compatibility_status: data.compatibility_status === "available"
         ? "available"
         : "insufficient_data",
@@ -422,6 +535,8 @@ function parseAdminProposals(data: unknown): AdminProposal[] {
       throw new ApiError("Uma proposta administrativa possui dados inválidos.", 200);
     }
 
+    const preferences = getAdminProposalPreferences(proposal.preferences);
+
     return {
       id: proposal.id,
       title: proposal.title,
@@ -438,6 +553,7 @@ function parseAdminProposals(data: unknown): AdminProposal[] {
       reviewed_at: proposal.reviewed_at ?? null,
       rejection_reason: proposal.rejection_reason,
       image_url: proposal.image_url,
+      preferences,
       author: {
         id: proposal.author.id,
         email: proposal.author.email,

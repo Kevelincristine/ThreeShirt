@@ -26,7 +26,7 @@ export function Navbar({ links, action }: NavbarProps) {
               className={({ isActive }) =>
                 isActive ? "site-nav__link is-active" : "site-nav__link"
               }
-              end={link.href === "/"}
+              end={link.href === "/" || link.href === "/student"}
               to={link.href}
             >
               {link.label}
@@ -34,7 +34,7 @@ export function Navbar({ links, action }: NavbarProps) {
           </li>
         ))}
         {action && (
-          <li>
+          <li className="site-nav__action">
             <button
               className="site-nav__link"
               disabled={action.disabled}

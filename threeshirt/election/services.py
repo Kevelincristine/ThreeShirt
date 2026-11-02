@@ -5,11 +5,12 @@ from decimal import Decimal, ROUND_HALF_UP
 
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import IntegrityError, transaction
-from django.db.models import Count
+from django.db.models import Count, F, Q
 
 from accounts.models import UserProfile
 
 from .models import (
+    COLORS,
     COLOR_CODES,
     ElectionSettings,
     PreferenceResponse,
@@ -114,6 +115,11 @@ def _cast_vote_once(user, proposal_id):
         if proposal.status != ShirtProposal.Status.APPROVED:
             raise ValidationError({
                 "proposal": "Só é possível votar em propostas aprovadas."
+            })
+
+        if proposal.author_id == user.pk:
+            raise ValidationError({
+                "proposal": "Você não pode votar na sua própria proposta."
             })
 
         if Vote.objects.filter(student=user).exists():
@@ -400,7 +406,7 @@ def get_pending_proposal_descriptions(user):
 
 
 def get_approved_proposals(user):
-    """Return approved proposals to an active student, newest first."""
+    """Return all approved proposals, newest first, for student voters."""
 
     _require_student_user(user)
 
@@ -414,12 +420,27 @@ def get_vote_tally():
 
     Votes for proposals that are no longer approved remain in the database
     but are excluded from the valid-vote denominator and winner calculation.
+    Self-votes are excluded until results are released after voting closes;
+    released historical results keep their original totals.
     """
+
+    settings = ElectionSettings.objects.filter(pk=1).first()
+    preserve_released_results = (
+        settings is not None
+        and not settings.voting_open
+        and settings.results_release_authorized
+    )
+    vote_count = Count("votes")
+    if not preserve_released_results:
+        vote_count = Count(
+            "votes",
+            filter=~Q(votes__student_id=F("author_id")),
+        )
 
     proposal_counts = list(
         ShirtProposal.objects
-        .values("pk", "title", "status")
-        .annotate(vote_count=Count("votes"))
+        .values("pk", "title", "status", "author_id")
+        .annotate(vote_count=vote_count)
         .order_by("pk")
     )
 
@@ -486,6 +507,135 @@ def get_vote_tally():
         "proposals": results,
         "winners": winners,
         "is_tie": len(winners) > 1,
+    }
+
+
+def get_preference_tally():
+    """Aggregate the existing survey answers for active student accounts."""
+
+    responses = list(
+        PreferenceResponse.objects.filter(
+            student__is_active=True,
+            student__profile__role__in=UserProfile.STUDENT_ROLES,
+        ).order_by("pk")
+    )
+    respondent_count = len(responses)
+
+    def build_question(question_id, question, denominator, options):
+        return {
+            "id": question_id,
+            "question": question,
+            "respondent_count": denominator,
+            "options": [
+                {
+                    "value": value,
+                    "label": label,
+                    "response_count": count,
+                    "percentage": (
+                        Decimal(count * 100) / Decimal(denominator)
+                        if denominator
+                        else None
+                    ),
+                }
+                for value, label, count in options
+            ],
+        }
+
+    boolean_options = ((True, "Sim"), (False, "Não"))
+
+    def boolean_question_options(field):
+        return [
+            (
+                str(value).lower(),
+                label,
+                sum(getattr(response, field) is value for response in responses),
+            )
+            for value, label in boolean_options
+        ]
+
+    base_color_options = [
+        (
+            value,
+            label,
+            sum(response.base_color == value for response in responses),
+        )
+        for value, label in PreferenceResponse.BaseColor.choices
+    ]
+    wants_animal_count = sum(response.wants_animal for response in responses)
+    animal_counts = {}
+    for response in responses:
+        if response.wants_animal and response.preferred_animal:
+            animal_counts[response.preferred_animal] = (
+                animal_counts.get(response.preferred_animal, 0) + 1
+            )
+
+    questions = [
+        build_question(
+            "base_color",
+            "Cor-base preferida",
+            respondent_count,
+            base_color_options,
+        ),
+        build_question(
+            "related_to_course",
+            "Você gostaria que a camiseta fosse relacionada ao curso?",
+            respondent_count,
+            boolean_question_options("related_to_course"),
+        ),
+        build_question(
+            "wants_animal",
+            "Você gostaria de um tema com animal?",
+            respondent_count,
+            boolean_question_options("wants_animal"),
+        ),
+        build_question(
+            "preferred_animal",
+            "Qual animal?",
+            wants_animal_count,
+            [
+                (animal, animal, count)
+                for animal, count in sorted(
+                    animal_counts.items(),
+                    key=lambda item: (item[0].casefold(), item[0]),
+                )
+            ],
+        ),
+        build_question(
+            "preferred_colors",
+            "Quais cores adicionais você prefere? (opcional)",
+            respondent_count,
+            [
+                (
+                    value,
+                    label,
+                    sum(value in response.preferred_colors for response in responses),
+                )
+                for value, label in COLORS
+            ],
+        ),
+        build_question(
+            "wants_collar",
+            "Você prefere camiseta com gola?",
+            respondent_count,
+            boolean_question_options("wants_collar"),
+        ),
+        build_question(
+            "wants_phrase",
+            "Você gostaria de uma frase na camiseta?",
+            respondent_count,
+            boolean_question_options("wants_phrase"),
+        ),
+        build_question(
+            "intends_to_buy",
+            "Você pretende comprar a camiseta?",
+            respondent_count,
+            boolean_question_options("intends_to_buy"),
+        ),
+    ]
+
+    return {
+        "respondent_count": respondent_count,
+        "questions": questions,
     }
 
 
