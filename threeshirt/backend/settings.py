@@ -35,7 +35,7 @@ AUTHORIZED_LOGIN_EMAILS = [
 
 # Segurança.
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "")
-DEBUG = True
+DEBUG = os.getenv("DJANGO_DEBUG", "True").strip().lower() == "true"
 ALLOWED_HOSTS = [
     "127.0.0.1",
     "localhost",
@@ -111,9 +111,20 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "accounts.middleware.CredentialRevisionMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
+
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = "Lax"
+SESSION_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_SAMESITE = "Lax"
+CSRF_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_HTTPONLY = False
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_REFERRER_POLICY = "same-origin"
+X_FRAME_OPTIONS = "DENY"
 
 
 # URLs e templates.
@@ -138,15 +149,23 @@ WSGI_APPLICATION = "backend.wsgi.application"
 
 
 # Banco de dados.
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
-        "OPTIONS": {
-            "transaction_mode": "IMMEDIATE",
-        },
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+if DATABASE_URL:
+    import dj_database_url
+
+    DATABASES = {
+        "default": dj_database_url.parse(DATABASE_URL),
     }
-}
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": BASE_DIR / "db.sqlite3",
+            "OPTIONS": {
+                "transaction_mode": "IMMEDIATE",
+            },
+        }
+    }
 
 
 # Validação de senhas.
@@ -190,24 +209,6 @@ STATIC_URL = "static/"
 MEDIA_URL = "media/"
 MEDIA_ROOT = BASE_DIR / "media"
 PRIVATE_MEDIA_ROOT = BASE_DIR / "private_media"
-
-# E-mail.
-EMAIL_BACKEND = os.getenv(
-    "EMAIL_BACKEND",
-    "django.core.mail.backends.smtp.EmailBackend",
-)
-
-EMAIL_HOST = os.getenv("EMAIL_HOST", "smtp-relay.brevo.com")
-EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
-EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "True").lower() == "true"
-
-EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
-EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
-
-DEFAULT_FROM_EMAIL = os.getenv(
-    "DEFAULT_FROM_EMAIL",
-    "ThreeShirt <kevelincristine82@gmail.com>",
-)
 
 # Tipo padrão de chave primária.
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"

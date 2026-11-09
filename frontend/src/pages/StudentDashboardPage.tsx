@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { Alert } from "../components/feedback/Alert";
 import { Loading } from "../components/feedback/Loading";
+import { AccountPasswordForm } from "../components/AccountPasswordForm";
 import { useAuth } from "../app/AuthContext";
 import { getStudentDashboard } from "../services/api";
 import type { StudentDashboardResponse } from "../types/api";
@@ -169,6 +170,7 @@ export function StudentDashboardPage() {
           </nav>
         </>
       )}
+      <AccountPasswordForm />
     </section>
   );
 }

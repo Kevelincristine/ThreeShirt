@@ -19,17 +19,15 @@ urlpatterns = [
         views.logout_user,
         name="logout",
     ),
-    # Solicita um código temporário por e-mail.
     path(
-        "request-code/",
-        views.request_login_code,
-        name="request_login_code",
+        "login/",
+        views.login_with_password,
+        name="login",
     ),
-
-    # Verifica o código e inicia a sessão.
+    path("first-access/", views.first_access, name="first_access"),
     path(
-        "verify-code/",
-        views.verify_login_code,
-        name="verify_login_code",
+        "password/change/",
+        views.change_password,
+        name="change_password",
     ),
 ]

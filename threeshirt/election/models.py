@@ -25,6 +25,69 @@ COLORS = [
 COLOR_CODES = {code for code, label in COLORS}
 
 
+class ParticipationIdentity(models.Model):
+    """Separates an account login from one historical participation period."""
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="participation_identities",
+        null=True,
+        blank=True,
+    )
+    original_user_id = models.PositiveBigIntegerField(db_index=True)
+    generation = models.PositiveIntegerField()
+    display_label = models.CharField(max_length=80, default="Participante")
+    is_current = models.BooleanField(default=True)
+    is_eligible = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    ended_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "generation"],
+                name="election_participation_user_generation_unique",
+            ),
+            models.UniqueConstraint(
+                fields=["user"],
+                condition=Q(is_current=True, user__isnull=False),
+                name="election_one_current_participation_identity",
+            ),
+        ]
+        ordering = ["user_id", "generation"]
+
+    def __str__(self):
+        return self.display_label
+
+
+def get_or_create_current_identity(user):
+    identity = ParticipationIdentity.objects.filter(
+        user_id=user.pk,
+        is_current=True,
+    ).first()
+    if identity is not None:
+        return identity
+    generation = (
+        ParticipationIdentity.objects.filter(user_id=user.pk)
+        .aggregate(value=models.Max("generation"))["value"]
+        or 0
+    ) + 1
+    from accounts.models import UserProfile
+
+    role = UserProfile.objects.filter(user_id=user.pk).values_list(
+        "role",
+        flat=True,
+    ).first()
+    return ParticipationIdentity.objects.create(
+        user_id=user.pk,
+        original_user_id=user.pk,
+        generation=generation,
+        display_label=f"Participante {user.pk}-{generation}",
+        is_eligible=role in ("STUDENT", "STUDENT_ADMIN"),
+    )
+
+
 def validate_colors(value):
     """Aceita uma lista de cores válidas, sem repetições."""
     if not isinstance(value, list):
@@ -49,9 +112,19 @@ class PreferenceResponse(models.Model):
 
     student = models.OneToOneField(
         settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        related_name="preference_response",
+        on_delete=models.SET_NULL,
+        related_name="legacy_preference_responses",
+        null=True,
+        blank=True,
     )
+    participation_identity = models.OneToOneField(
+        ParticipationIdentity,
+        on_delete=models.PROTECT,
+        related_name="preference_response",
+        null=True,
+        blank=True,
+    )
+    is_invalidated = models.BooleanField(default=False, db_index=True)
 
     base_color = models.CharField(
         "cor-base preferida",
@@ -106,7 +179,19 @@ class PreferenceResponse(models.Model):
             })
 
     def __str__(self):
-        return f"Preferências de {self.student}"
+        return f"Preferências de {self.participation_identity}"
+
+    def save(self, *args, **kwargs):
+        if self.student_id:
+            identity = get_or_create_current_identity(self.student)
+            if self.participation_identity_id != identity.pk:
+                self.participation_identity = identity
+                if kwargs.get("update_fields") is not None:
+                    kwargs["update_fields"] = (
+                        set(kwargs["update_fields"])
+                        | {"participation_identity"}
+                    )
+        return super().save(*args, **kwargs)
 
 
 class ShirtProposal(models.Model):
@@ -123,8 +208,17 @@ class ShirtProposal(models.Model):
 
     author = models.ForeignKey(
         settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="legacy_shirt_proposals",
+        null=True,
+        blank=True,
+    )
+    author_identity = models.ForeignKey(
+        ParticipationIdentity,
         on_delete=models.PROTECT,
         related_name="shirt_proposals",
+        null=True,
+        blank=True,
     )
 
     title = models.CharField(max_length=100)
@@ -158,6 +252,7 @@ class ShirtProposal(models.Model):
         default=Status.PENDING,
         db_index=True,
     )
+    is_invalidated = models.BooleanField(default=False, db_index=True)
 
     reviewed_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -221,6 +316,17 @@ class ShirtProposal(models.Model):
     def __str__(self):
         return self.title
 
+    def save(self, *args, **kwargs):
+        if self.author_id:
+            identity = get_or_create_current_identity(self.author)
+            if self.author_identity_id != identity.pk:
+                self.author_identity = identity
+                if kwargs.get("update_fields") is not None:
+                    kwargs["update_fields"] = (
+                        set(kwargs["update_fields"]) | {"author_identity"}
+                    )
+        return super().save(*args, **kwargs)
+
 
 
 class Vote(models.Model):
@@ -228,8 +334,17 @@ class Vote(models.Model):
 
     student = models.OneToOneField(
         settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="legacy_shirt_votes",
+        null=True,
+        blank=True,
+    )
+    participation_identity = models.ForeignKey(
+        ParticipationIdentity,
         on_delete=models.PROTECT,
-        related_name="shirt_vote",
+        related_name="votes",
+        null=True,
+        blank=True,
     )
 
     proposal = models.ForeignKey(
@@ -239,9 +354,17 @@ class Vote(models.Model):
     )
 
     created_at = models.DateTimeField(auto_now_add=True)
+    is_invalidated = models.BooleanField(default=False, db_index=True)
 
     class Meta:
         ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["participation_identity"],
+                condition=Q(is_invalidated=False),
+                name="election_one_valid_vote_per_identity",
+            ),
+        ]
 
     def clean(self):
         super().clean()
@@ -254,7 +377,147 @@ class Vote(models.Model):
             })
 
     def __str__(self):
-        return f"{self.student} → {self.proposal}"
+        return f"{self.participation_identity} → {self.proposal}"
+
+    def save(self, *args, **kwargs):
+        if self.student_id:
+            identity = get_or_create_current_identity(self.student)
+            if self.participation_identity_id != identity.pk:
+                self.participation_identity = identity
+                if kwargs.get("update_fields") is not None:
+                    kwargs["update_fields"] = (
+                        set(kwargs["update_fields"])
+                        | {"participation_identity"}
+                    )
+        return super().save(*args, **kwargs)
+
+
+class ParticipationAuditEvent(models.Model):
+    class ParticipationType(models.TextChoices):
+        PREFERENCE_RESPONSE = "PREFERENCE_RESPONSE", "Resposta da pesquisa"
+        VOTE = "VOTE", "Voto"
+        PROPOSAL = "PROPOSAL", "Proposta"
+
+    class Action(models.TextChoices):
+        INVALIDATE = "INVALIDATE", "Invalidada"
+        RESTORE = "RESTORE", "Restaurada"
+        AUTHORIZE_REPLACEMENT_VOTE = (
+            "AUTHORIZE_REPLACEMENT_VOTE",
+            "Novo voto autorizado",
+        )
+
+    participation_type = models.CharField(
+        max_length=20,
+        choices=ParticipationType.choices,
+    )
+    participation_id = models.PositiveBigIntegerField()
+    participation_identity = models.ForeignKey(
+        ParticipationIdentity,
+        on_delete=models.SET_NULL,
+        related_name="audit_events",
+        null=True,
+        blank=True,
+    )
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="participation_audit_events",
+        null=True,
+        blank=True,
+    )
+    actor_identifier = models.PositiveBigIntegerField()
+    action = models.CharField(max_length=32, choices=Action.choices)
+    reason = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+
+class VoteReplacementAuthorization(models.Model):
+    participation_identity = models.ForeignKey(
+        ParticipationIdentity,
+        on_delete=models.PROTECT,
+        related_name="vote_replacement_authorizations",
+    )
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="vote_replacement_authorizations",
+        null=True,
+        blank=True,
+    )
+    actor_identifier = models.PositiveBigIntegerField()
+    reason = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    consumed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["participation_identity"],
+                condition=Q(consumed_at__isnull=True),
+                name="election_one_pending_vote_replacement",
+            ),
+        ]
+
+
+class ImmutableResultSnapshotQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        raise ValidationError("Snapshots de resultados são imutáveis.")
+
+    def delete(self):
+        raise ValidationError("Snapshots de resultados não podem ser excluídos.")
+
+    def bulk_update(self, objs, fields, batch_size=None):
+        raise ValidationError("Snapshots de resultados são imutáveis.")
+
+    def bulk_create(self, objs, **kwargs):
+        raise ValidationError("Crie snapshots individualmente para validar sua integridade.")
+
+
+class ElectionResultSnapshotManager(
+    models.Manager.from_queryset(ImmutableResultSnapshotQuerySet)
+):
+    use_in_migrations = False
+
+
+class ElectionResultSnapshot(models.Model):
+    sequence = models.PositiveIntegerField(unique=True)
+    payload = models.JSONField(default=dict)
+    image_manifest = models.JSONField(default=dict)
+    payload_sha256 = models.CharField(max_length=64)
+    state_sha256 = models.CharField(max_length=64)
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name="result_snapshots",
+        null=True,
+        blank=True,
+    )
+    actor_identifier = models.PositiveBigIntegerField(null=True, blank=True)
+    trigger = models.CharField(max_length=40)
+    previous = models.ForeignKey(
+        "self",
+        on_delete=models.PROTECT,
+        related_name="subsequent_snapshots",
+        null=True,
+        blank=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-sequence"]
+
+    objects = ElectionResultSnapshotManager()
+
+    def save(self, *args, **kwargs):
+        if self.pk and type(self).objects.filter(pk=self.pk).exists():
+            raise ValidationError("Snapshots de resultados são imutáveis.")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("Snapshots de resultados não podem ser excluídos.")
 
 
 class ElectionSettings(models.Model):
@@ -324,26 +587,34 @@ class ElectionSettings(models.Model):
 
 class MaintenanceConfirmation(models.Model):
     class Action(models.TextChoices):
+        RESET_USER_BASIC = "RESET_USER_BASIC", "Reinicializar conta"
+        RESET_USER_FULL = "RESET_USER_FULL", "Reinicializar conta integralmente"
         DELETE_USER = "DELETE_USER", "Excluir conta"
         DELETE_PROPOSAL = "DELETE_PROPOSAL", "Excluir proposta"
         RESET_ELECTION = "RESET_ELECTION", "Reiniciar eleição"
 
     actor = models.ForeignKey(
         settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
         related_name="maintenance_confirmations",
+        null=True,
+        blank=True,
     )
+    actor_identifier = models.PositiveBigIntegerField(default=0)
     token_digest = models.CharField(max_length=64, unique=True)
     action = models.CharField(max_length=20, choices=Action.choices)
     target_id = models.PositiveBigIntegerField(null=True, blank=True)
     summary = models.JSONField(default=dict)
     snapshot_digest = models.CharField(max_length=64)
+    reason = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField()
 
 
 class MaintenanceAudit(models.Model):
     class Action(models.TextChoices):
+        RESET_USER_BASIC = "RESET_USER_BASIC", "Reinicializar conta"
+        RESET_USER_FULL = "RESET_USER_FULL", "Reinicializar conta integralmente"
         DELETE_USER = "DELETE_USER", "Excluir conta"
         DELETE_PROPOSAL = "DELETE_PROPOSAL", "Excluir proposta"
         RESET_ELECTION = "RESET_ELECTION", "Reiniciar eleição"
@@ -356,8 +627,12 @@ class MaintenanceAudit(models.Model):
         blank=True,
     )
     actor_identifier = models.PositiveBigIntegerField()
+    target_identifier = models.PositiveBigIntegerField(null=True, blank=True)
     action = models.CharField(max_length=20, choices=Action.choices)
     affected_counts = models.JSONField(default=dict)
+    reason = models.TextField(blank=True, default="")
+    result = models.CharField(max_length=20, default="completed")
+    details = models.JSONField(default=dict)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

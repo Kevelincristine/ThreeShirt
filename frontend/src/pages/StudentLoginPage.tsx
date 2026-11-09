@@ -1,39 +1,57 @@
-import { useRef, useState, type FormEvent } from "react";
-import { useNavigate } from "react-router-dom";
+import { useState, type FormEvent } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { Alert } from "../components/feedback/Alert";
-import { Loading } from "../components/feedback/Loading";
 import { useAuth } from "../app/AuthContext";
-import { ApiError, requestLoginCode, verifyLoginCode } from "../services/api";
-import {
-  isLoginCodeAccepted,
-  requestLoginCodeForEmail,
-} from "../services/loginCodeRequest";
+import { ApiError, loginWithPassword, setFirstAccessPassword } from "../services/api";
 
-type LoginStep = "email" | "code" | "session";
-type LoginAction = "request" | "verify" | "session" | null;
-
-export function StudentLoginPage() {
+export function StudentLoginPage({ firstAccess = false }: { firstAccess?: boolean }) {
   const { refreshSession } = useAuth();
   const navigate = useNavigate();
-  const [step, setStep] = useState<LoginStep>("email");
-  const [action, setAction] = useState<LoginAction>(null);
+  const [mode, setMode] = useState<"login" | "first-access">(
+    firstAccess ? "first-access" : "login",
+  );
   const [email, setEmail] = useState("");
-  const [code, setCode] = useState("");
+  const [password, setPassword] = useState("");
+  const [passwordConfirmation, setPasswordConfirmation] = useState("");
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
-  const actionInProgress = useRef(false);
+  const [pending, setPending] = useState(false);
 
-  function describeError(reason: unknown): string {
-    if (reason instanceof ApiError) return reason.message;
-    return "Não foi possível concluir a solicitação. Tente novamente.";
+  function selectMode(nextMode: "login" | "first-access") {
+    setMode(nextMode);
+    setPassword("");
+    setPasswordConfirmation("");
+    setNotice("");
+    setError("");
   }
 
-  async function confirmSession(): Promise<void> {
-    setAction("session");
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (pending) return;
+    setPending(true);
     setError("");
+    setNotice("");
     try {
-      const session = await refreshSession();
-      if (session.status === "authenticated") {
+      if (mode === "first-access") {
+        if (password !== passwordConfirmation) {
+          setError("As senhas não coincidem.");
+          return;
+        }
+        const response = await setFirstAccessPassword(
+          email.trim(),
+          password,
+          passwordConfirmation,
+        );
+        setNotice(response.message);
+        setPassword("");
+        setPasswordConfirmation("");
+        setMode("login");
+      } else {
+        await loginWithPassword(email.trim(), password);
+        const session = await refreshSession();
+        if (session.status !== "authenticated") {
+          throw new Error("O servidor não confirmou a sessão autenticada.");
+        }
         navigate(
           session.user.role === "student" ||
             session.user.role === "student_admin"
@@ -41,88 +59,22 @@ export function StudentLoginPage() {
             : "/admin",
           { replace: true },
         );
-      } else if (session.status === "anonymous") {
-        setError(
-          "O código foi aceito, mas o servidor não confirmou uma sessão autenticada. Tente verificar novamente.",
-        );
+      }
+    } catch (reason) {
+      const message =
+        reason instanceof Error
+          ? reason.message
+          : "Não foi possível concluir a solicitação. Tente novamente.";
+      if (mode === "first-access" && reason instanceof ApiError && reason.status === 409) {
+        setNotice(message);
+        setPassword("");
+        setPasswordConfirmation("");
+        setMode("login");
       } else {
-        setError(
-          "O código foi aceito, mas não foi possível verificar sua sessão. Tente novamente.",
-        );
+        setError(message);
       }
-    } catch (reason) {
-      setError(describeError(reason));
     } finally {
-      setAction(null);
-    }
-  }
-
-  async function retrySessionConfirmation(): Promise<void> {
-    if (actionInProgress.current) return;
-    actionInProgress.current = true;
-    try {
-      await confirmSession();
-    } finally {
-      actionInProgress.current = false;
-    }
-  }
-
-  async function sendCode(event?: FormEvent<HTMLFormElement>) {
-    event?.preventDefault();
-    if (actionInProgress.current) return;
-
-    actionInProgress.current = true;
-    setAction("request");
-    setError("");
-    setNotice("");
-    try {
-      const response = await requestLoginCodeForEmail(email, requestLoginCode);
-      if (isLoginCodeAccepted(response.state)) {
-        setStep("code");
-        setCode("");
-        setNotice(response.message);
-        return;
-      }
-      switch (response.state) {
-        case "unauthorized":
-        case "account_unavailable":
-        case "send_failed":
-        case "invalid_email":
-          setStep("email");
-          setError(response.message);
-          break;
-        case "rate_limited":
-          setError(response.message);
-          break;
-      }
-    } catch (reason) {
-      setError(describeError(reason));
-    } finally {
-      actionInProgress.current = false;
-      setAction(null);
-    }
-  }
-
-  async function verifyCode(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (actionInProgress.current) return;
-
-    actionInProgress.current = true;
-    setAction("verify");
-    setError("");
-    setNotice("");
-    try {
-      await verifyLoginCode(
-        email.trim().toLowerCase(),
-        code,
-      );
-      setStep("session");
-      await confirmSession();
-    } catch (reason) {
-      setError(describeError(reason));
-    } finally {
-      actionInProgress.current = false;
-      setAction(null);
+      setPending(false);
     }
   }
 
@@ -131,119 +83,91 @@ export function StudentLoginPage() {
       aria-labelledby="student-login-title"
       className="paper-panel login-panel"
     >
-      <p className="eyebrow">Sua jornada começa aqui</p>
-      <h1 id="student-login-title">Acesse o ThreeShirt</h1>
-      <p className="login-intro">
-        Use seu e-mail escolar para receber um código temporário de acesso.
+      <p className="eyebrow">
+        {mode === "first-access"
+          ? "Crie sua senha para entrar"
+          : "Sua jornada começa aqui"}
       </p>
-
+      <h1 id="student-login-title">
+        {mode === "first-access" ? "Primeiro acesso" : "Acesse o ThreeShirt"}
+      </h1>
       {error && <Alert variant="error">{error}</Alert>}
       {notice && <Alert variant="info">{notice}</Alert>}
 
-      {step === "email" && (
-        <form className="login-form" onSubmit={(event) => void sendCode(event)}>
+      <form className="login-form" onSubmit={(event) => void handleSubmit(event)}>
+        <div className="form-field">
+          <label htmlFor="student-email">Gmail autorizado</label>
+          <input
+            autoComplete="email"
+            id="student-email"
+            maxLength={254}
+            name="email"
+            onChange={(event) => setEmail(event.target.value)}
+            required
+            type="email"
+            value={email}
+          />
+        </div>
+        <div className="form-field">
+          <label htmlFor="student-password">
+            {mode === "login" ? "Senha" : "Nova senha"}
+          </label>
+          <input
+            autoComplete={mode === "login" ? "current-password" : "new-password"}
+            id="student-password"
+            maxLength={1024}
+            name="password"
+            onChange={(event) => setPassword(event.target.value)}
+            required
+            type="password"
+            value={password}
+          />
+        </div>
+        {mode === "first-access" && (
           <div className="form-field">
-            <label htmlFor="student-email">E-mail escolar</label>
+            <label htmlFor="student-password-confirmation">
+              Confirmar nova senha
+            </label>
             <input
-              autoComplete="email"
-              id="student-email"
-              maxLength={254}
-              name="email"
-              onChange={(event) => setEmail(event.target.value)}
+              autoComplete="new-password"
+              id="student-password-confirmation"
+              maxLength={1024}
+              onChange={(event) => setPasswordConfirmation(event.target.value)}
               required
-              type="email"
-              value={email}
+              type="password"
+              value={passwordConfirmation}
             />
           </div>
+        )}
+        <button
+          className="button button--primary"
+          disabled={pending}
+          type="submit"
+        >
+          {pending
+            ? "Aguarde..."
+            : mode === "login"
+              ? "Entrar"
+              : "Definir senha"}
+        </button>
+      </form>
+
+      <div className="login-secondary-actions">
+        {mode === "login" ? (
+          <Link className="text-button" to="/first-access">
+            Primeiro acesso? Defina sua senha
+          </Link>
+        ) : (
           <button
-            className="button button--primary"
-            disabled={action !== null}
-            type="submit"
+            className="text-button"
+            disabled={pending}
+            onClick={() => selectMode("login")}
+            type="button"
           >
-            {action === "request" ? "Enviando..." : "Solicitar código"}
+            Voltar ao login
           </button>
-        </form>
-      )}
-
-      {step === "code" && (
-        <>
-          <p className="login-email-context">
-            Digite abaixo o código enviado para <strong>{email}</strong>.
-            Verifique também a pasta de spam ou solicite outro código.
-          </p>
-          <form className="login-form" onSubmit={verifyCode}>
-            <div className="form-field">
-              <label htmlFor="verification-code">Código de verificação</label>
-              <input
-                autoComplete="one-time-code"
-                autoFocus
-                aria-describedby="verification-code-hint"
-                id="verification-code"
-                inputMode="numeric"
-                maxLength={6}
-                name="code"
-                onChange={(event) =>
-                  setCode(event.target.value.replace(/\D/g, "").slice(0, 6))
-                }
-                pattern="[0-9]{6}"
-                required
-                type="text"
-                value={code}
-              />
-              <p className="form-hint" id="verification-code-hint">
-                Digite os seis números recebidos no seu e-mail.
-              </p>
-            </div>
-            <button
-              className="button button--primary"
-              disabled={action !== null}
-              type="submit"
-            >
-              {action === "verify" ? "Verificando..." : "Verificar código"}
-            </button>
-          </form>
-          <div className="login-secondary-actions">
-            <button
-              className="text-button"
-              disabled={action !== null}
-              onClick={() => void sendCode()}
-              type="button"
-            >
-              {action === "request" ? "Enviando..." : "Enviar outro código"}
-            </button>
-            <button
-              className="text-button"
-              disabled={action !== null}
-              onClick={() => {
-                setStep("email");
-                setCode("");
-                setError("");
-                setNotice("");
-              }}
-              type="button"
-            >
-              Alterar e-mail
-            </button>
-          </div>
-        </>
-      )}
-
-      {step === "session" && (
-        <div className="login-complete">
-          {action === "session" ? (
-            <Loading label="Código aceito. Confirmando sua sessão..." />
-          ) : (
-            <button
-              className="button button--primary"
-              onClick={() => void retrySessionConfirmation()}
-              type="button"
-            >
-              Tentar verificar novamente
-            </button>
-          )}
-        </div>
-      )}
-
+        )}
+      </div>
     </section>
   );
 }

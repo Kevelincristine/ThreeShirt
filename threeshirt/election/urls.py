@@ -39,6 +39,26 @@ urlpatterns = [
         name="admin-user-status",
     ),
     path(
+        "api/election/admin/users/<int:user_id>/history/",
+        views.admin_user_history,
+        name="admin-user-history",
+    ),
+    path(
+        "api/election/admin/users/<int:user_id>/vote-replacement/",
+        views.authorize_replacement_vote,
+        name="admin-authorize-replacement-vote",
+    ),
+    path(
+        "api/election/admin/participations/<str:kind>/<int:participation_id>/invalidate/",
+        views.invalidate_participation,
+        name="admin-invalidate-participation",
+    ),
+    path(
+        "api/election/admin/participations/<str:kind>/<int:participation_id>/restore/",
+        views.restore_participation,
+        name="admin-restore-participation",
+    ),
+    path(
         "api/election/admin/maintenance/preview/",
         views.admin_maintenance_preview,
         name="admin-maintenance-preview",
@@ -87,5 +107,10 @@ urlpatterns = [
         "proposals/<int:proposal_id>/image/",
         views.proposal_image,
         name="proposal-image",
+    ),
+    path(
+        "api/election/results/snapshots/<int:sequence>/images/<int:proposal_id>/",
+        views.result_snapshot_image,
+        name="result-snapshot-image",
     ),
 ]

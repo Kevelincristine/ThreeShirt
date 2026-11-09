@@ -2,18 +2,6 @@ export interface ApiMessageResponse {
   message: string;
 }
 
-export type LoginCodeRequestState =
-  | "unauthorized"
-  | "account_unavailable"
-  | "send_failed"
-  | "rate_limited"
-  | "invalid_email"
-  | "enter_code";
-
-export interface LoginCodeRequestResponse extends ApiMessageResponse {
-  state: LoginCodeRequestState;
-}
-
 export type SessionRole = "student" | "student_admin" | "admin";
 
 export interface SessionUser {
@@ -200,14 +188,20 @@ export interface AdminUser {
   role: "STUDENT" | "STUDENT_ADMIN" | "ADMIN";
   is_active: boolean;
   is_staff: boolean;
+  has_password: boolean;
+  has_participation: boolean;
 }
 
 export type AdminMaintenanceAction =
+  | "reset_user_basic"
+  | "reset_user_full"
   | "delete_user"
   | "delete_proposal"
   | "reset_election";
 
 export type AdminMaintenanceOperation =
+  | "RESET_USER_BASIC"
+  | "RESET_USER_FULL"
   | "DELETE_USER"
   | "DELETE_PROPOSAL"
   | "RESET_ELECTION";
@@ -234,9 +228,46 @@ export interface AdminMaintenancePreview {
   };
 }
 
+export interface AdminUserHistory {
+  user_id: number;
+  participations: Array<{
+    identity_id: number;
+    generation: number;
+    label: string;
+    current: boolean;
+    eligible: boolean;
+    created_at: string;
+    ended_at: string | null;
+    responses: number;
+    votes: number;
+    proposals: number;
+  }>;
+  participation_audit: Array<{
+    id: number;
+    type: string;
+    participation_id: number;
+    action: string;
+    reason: string;
+    actor_id: number;
+    created_at: string;
+  }>;
+  account_audit: Array<{
+    id: number;
+    action: string;
+    reason: string;
+    actor_id: number;
+    created_at: string;
+  }>;
+}
+
 export interface AdminMaintenanceResult {
   message: string;
   affected: Record<string, number>;
   warning: string;
   file_cleanup_pending: boolean;
+  backup?: {
+    path: string;
+    sha256: string;
+    integrity: "ok";
+  };
 }

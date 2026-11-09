@@ -2,10 +2,19 @@
 
 from collections.abc import Mapping
 from decimal import Decimal, ROUND_HALF_UP
+import hashlib
+import json
+from pathlib import Path
 
+from django.conf import settings as django_settings
+from django.core.files.base import ContentFile
+from django.core.files.storage import FileSystemStorage
 from django.core.exceptions import PermissionDenied, ValidationError
+from django.contrib.auth import get_user_model
+from django.core.serializers.json import DjangoJSONEncoder
 from django.db import IntegrityError, transaction
 from django.db.models import Count, F, Q
+from django.urls import reverse
 
 from accounts.models import UserProfile
 
@@ -13,11 +22,16 @@ from .models import (
     COLORS,
     COLOR_CODES,
     ElectionSettings,
+    ElectionResultSnapshot,
     PreferenceResponse,
+    ParticipationIdentity,
     ShirtProposal,
     Vote,
+    VoteReplacementAuthorization,
+    get_or_create_current_identity,
 )
 from .concurrency import run_with_sqlite_lock_retry
+from .validators import get_proposal_image_format
 
 
 MIN_COMPARABLE_CRITERIA = 3
@@ -61,12 +75,19 @@ def _require_student_user(user):
 
     if (
         not getattr(user, "is_authenticated", False)
-        or not getattr(user, "is_active", False)
     ):
-        raise PermissionDenied("É necessário um usuário ativo.")
+        raise PermissionDenied("É necessário um usuário autenticado.")
 
+    account = (
+        get_user_model().objects
+        .select_related("profile")
+        .filter(pk=user.pk, is_active=True)
+        .first()
+    )
+    if account is None:
+        raise PermissionDenied("É necessário um usuário ativo.")
     try:
-        profile = user.profile
+        profile = account.profile
     except UserProfile.DoesNotExist as exc:
         raise PermissionDenied(
             "O usuário precisa ter um perfil de estudante."
@@ -76,6 +97,21 @@ def _require_student_user(user):
         raise PermissionDenied(
             "Somente estudantes podem responder à pesquisa."
         )
+    return account
+
+
+def _current_identity(user, lock=False):
+    account = _require_student_user(user)
+    identities = ParticipationIdentity.objects.filter(
+        user_id=account.pk,
+        is_current=True,
+    )
+    if lock:
+        identities = identities.select_for_update()
+    identity = identities.first()
+    if identity is None:
+        identity = get_or_create_current_identity(account)
+    return account, identity
 
 
 def cast_vote(user, proposal_id):
@@ -100,6 +136,7 @@ def _cast_vote_once(user, proposal_id):
         if settings is None or not settings.voting_open:
             raise ValidationError({"voting": "A votação está fechada."})
 
+        _account, identity = _current_identity(user, lock=True)
         proposal = (
             ShirtProposal.objects
             .select_for_update()
@@ -112,34 +149,64 @@ def _cast_vote_once(user, proposal_id):
                 "proposal": "A proposta selecionada não existe."
             })
 
-        if proposal.status != ShirtProposal.Status.APPROVED:
+        if (
+            proposal.status != ShirtProposal.Status.APPROVED
+            or proposal.is_invalidated
+        ):
             raise ValidationError({
                 "proposal": "Só é possível votar em propostas aprovadas."
             })
 
-        if proposal.author_id == user.pk:
+        if proposal.author_identity_id == identity.pk:
             raise ValidationError({
                 "proposal": "Você não pode votar na sua própria proposta."
             })
 
-        if Vote.objects.filter(student=user).exists():
+        if Vote.objects.filter(
+            participation_identity=identity,
+            is_invalidated=False,
+        ).exists():
             raise ValidationError({
                 "vote": "Você já registrou seu voto."
             })
 
+        replacement = None
+        if Vote.objects.filter(participation_identity=identity).exists():
+            replacement = (
+                VoteReplacementAuthorization.objects.select_for_update()
+                .filter(
+                    participation_identity=identity,
+                    consumed_at__isnull=True,
+                )
+                .first()
+            )
+            if replacement is None:
+                raise ValidationError({
+                    "vote": (
+                        "É necessária uma autorização administrativa para "
+                        "registrar um novo voto."
+                    )
+                })
         try:
             with transaction.atomic():
                 vote = Vote.objects.create(
-                    student=user,
+                    student=None,
+                    participation_identity=identity,
                     proposal=proposal,
                 )
         except IntegrityError as exc:
-            if Vote.objects.filter(student=user).exists():
+            if Vote.objects.filter(
+                participation_identity=identity,
+                is_invalidated=False,
+            ).exists():
                 raise ValidationError({
                     "vote": "Você já registrou seu voto."
                 }) from exc
 
             raise
+        if replacement is not None:
+            replacement.consumed_at = vote.created_at
+            replacement.save(update_fields=["consumed_at"])
 
     return vote
 
@@ -185,15 +252,25 @@ def save_preference_response(user, data):
                 {"survey": "A pesquisa de preferências está fechada."}
             )
 
+        _account, identity = _current_identity(user, lock=True)
         response = (
             PreferenceResponse.objects
             .select_for_update()
-            .filter(student=user)
+            .filter(participation_identity=identity)
             .first()
         )
 
         if response is None:
-            response = PreferenceResponse(student=user)
+            response = PreferenceResponse(
+                student=None,
+                participation_identity=identity,
+            )
+        elif response.is_invalidated:
+            raise ValidationError({
+                "survey": (
+                    "A resposta foi invalidada e não pode ser alterada."
+                )
+            })
 
         for field, value in data.items():
             setattr(response, field, value)
@@ -232,13 +309,6 @@ def submit_shirt_proposal(user, data):
     if not isinstance(data, Mapping):
         raise ValidationError("Os dados da proposta devem ser um objeto.")
 
-    settings = ElectionSettings.objects.filter(pk=1).first()
-
-    if settings is not None and settings.proposal_submission_open is False:
-        raise ValidationError({
-            "proposal_submission": "O envio de propostas está fechado."
-        })
-
     unknown_fields = set(data) - SHIRT_PROPOSAL_FIELDS
 
     if unknown_fields:
@@ -247,16 +317,29 @@ def submit_shirt_proposal(user, data):
             for field in unknown_fields
         })
 
-    proposal = ShirtProposal(
-        author=user,
-        status=ShirtProposal.Status.PENDING,
-    )
+    with transaction.atomic():
+        settings = (
+            ElectionSettings.objects
+            .select_for_update()
+            .filter(pk=1)
+            .first()
+        )
+        if settings is not None and settings.proposal_submission_open is False:
+            raise ValidationError({
+                "proposal_submission": "O envio de propostas está fechado."
+            })
+        _account, identity = _current_identity(user, lock=True)
+        proposal = ShirtProposal(
+            author=None,
+            author_identity=identity,
+            status=ShirtProposal.Status.PENDING,
+        )
 
-    for field, value in data.items():
-        setattr(proposal, field, value)
+        for field, value in data.items():
+            setattr(proposal, field, value)
 
-    proposal.full_clean()
-    proposal.save()
+        proposal.full_clean()
+        proposal.save()
 
     return proposal
 
@@ -266,7 +349,11 @@ def get_preference_response(user):
 
     _require_student_user(user)
 
-    return PreferenceResponse.objects.filter(student=user).first()
+    _account, identity = _current_identity(user)
+    return PreferenceResponse.objects.filter(
+        participation_identity=identity,
+        is_invalidated=False,
+    ).first()
 
 
 def is_survey_open():
@@ -380,6 +467,7 @@ def get_approved_proposal_compatibilities(user):
 
     proposals = ShirtProposal.objects.filter(
         status=ShirtProposal.Status.APPROVED,
+        is_invalidated=False,
     )
 
     for proposal in proposals:
@@ -400,7 +488,10 @@ def get_pending_proposal_descriptions(user):
 
     return list(
         ShirtProposal.objects
-        .filter(status=ShirtProposal.Status.PENDING)
+        .filter(
+            status=ShirtProposal.Status.PENDING,
+            is_invalidated=False,
+        )
         .values("id", "title", "description")
     )
 
@@ -412,17 +503,12 @@ def get_approved_proposals(user):
 
     return ShirtProposal.objects.filter(
         status=ShirtProposal.Status.APPROVED,
+        is_invalidated=False,
     ).order_by("-created_at", "-pk")
 
 
 def get_vote_tally():
-    """Count approved-proposal votes; report other vote records separately.
-
-    Votes for proposals that are no longer approved remain in the database
-    but are excluded from the valid-vote denominator and winner calculation.
-    Self-votes are excluded until results are released after voting closes;
-    released historical results keep their original totals.
-    """
+    """Count eligible votes without erasing invalidated or excluded records."""
 
     settings = ElectionSettings.objects.filter(pk=1).first()
     preserve_released_results = (
@@ -430,42 +516,79 @@ def get_vote_tally():
         and not settings.voting_open
         and settings.results_release_authorized
     )
-    vote_count = Count("votes")
-    if not preserve_released_results:
-        vote_count = Count(
-            "votes",
-            filter=~Q(votes__student_id=F("author_id")),
-        )
-
     proposal_counts = list(
         ShirtProposal.objects
-        .values("pk", "title", "status", "author_id")
-        .annotate(vote_count=vote_count)
+        .values(
+            "pk",
+            "title",
+            "status",
+            "is_invalidated",
+            "author_identity_id",
+        )
+        .annotate(
+            total_count=Count("votes"),
+            valid_count=Count(
+                "votes",
+                filter=Q(
+                    votes__is_invalidated=False,
+                    votes__participation_identity__is_eligible=True,
+                ),
+            ),
+            self_vote_count=Count(
+                "votes",
+                filter=Q(
+                    votes__is_invalidated=False,
+                    votes__participation_identity__is_eligible=True,
+                    votes__participation_identity_id=F("author_identity_id"),
+                    author_identity_id__isnull=False,
+                ),
+            ),
+            invalidated_count=Count(
+                "votes",
+                filter=Q(votes__is_invalidated=True),
+            ),
+        )
         .order_by("pk")
     )
 
-    approved_proposals = [
-        proposal for proposal in proposal_counts
-        if proposal["status"] == ShirtProposal.Status.APPROVED
-    ]
-
-    excluded_proposals = [
-        {
-            "proposal_id": proposal["pk"],
-            "title": proposal["title"],
-            "status": proposal["status"],
-            "vote_count": proposal["vote_count"],
-        }
-        for proposal in proposal_counts
-        if (
-            proposal["status"] != ShirtProposal.Status.APPROVED
-            and proposal["vote_count"]
+    approved_proposals = []
+    excluded_proposals = []
+    for proposal in proposal_counts:
+        excluded_count = 0
+        eligible = (
+            proposal["status"] == ShirtProposal.Status.APPROVED
+            and not proposal["is_invalidated"]
         )
-    ]
+        if eligible:
+            eligible_votes = proposal["valid_count"]
+            if not preserve_released_results:
+                eligible_votes -= proposal["self_vote_count"]
+            excluded_count = proposal["total_count"] - eligible_votes
+            approved_proposals.append({
+                **proposal,
+                "vote_count": eligible_votes,
+            })
+        else:
+            eligible_votes = 0
+            excluded_count = proposal["total_count"]
 
-    total_votes = sum(
-        proposal["vote_count"] for proposal in approved_proposals
-    )
+        if excluded_count:
+            excluded_proposals.append({
+                "proposal_id": proposal["pk"],
+                "title": proposal["title"],
+                "status": proposal["status"],
+                "is_invalidated": proposal["is_invalidated"],
+                "vote_count": excluded_count,
+                "reason": (
+                    "proposal_invalidated"
+                    if proposal["is_invalidated"]
+                    else "not_approved"
+                    if proposal["status"] != ShirtProposal.Status.APPROVED
+                    else "vote_invalidated_or_ineligible"
+                ),
+            })
+
+    total_votes = sum(proposal["vote_count"] for proposal in approved_proposals)
 
     results = []
 
@@ -500,9 +623,7 @@ def get_vote_tally():
     return {
         "status": "complete" if total_votes else "no_votes",
         "total_votes": total_votes,
-        "excluded_votes": sum(
-            proposal["vote_count"] for proposal in excluded_proposals
-        ),
+        "excluded_votes": sum(proposal["vote_count"] for proposal in excluded_proposals),
         "excluded_proposals": excluded_proposals,
         "proposals": results,
         "winners": winners,
@@ -511,12 +632,12 @@ def get_vote_tally():
 
 
 def get_preference_tally():
-    """Aggregate the existing survey answers for active student accounts."""
+    """Aggregate all valid historical participation generations."""
 
     responses = list(
         PreferenceResponse.objects.filter(
-            student__is_active=True,
-            student__profile__role__in=UserProfile.STUDENT_ROLES,
+            is_invalidated=False,
+            participation_identity__is_eligible=True,
         ).order_by("pk")
     )
     respondent_count = len(responses)
@@ -648,15 +769,18 @@ def get_compatibility_tally():
 
     proposals = list(
         ShirtProposal.objects
-        .filter(status=ShirtProposal.Status.APPROVED)
+        .filter(
+            status=ShirtProposal.Status.APPROVED,
+            is_invalidated=False,
+        )
         .order_by("pk")
     )
 
     responses = list(
         PreferenceResponse.objects
         .filter(
-            student__is_active=True,
-            student__profile__role__in=UserProfile.STUDENT_ROLES,
+            is_invalidated=False,
+            participation_identity__is_eligible=True,
         )
     )
 
@@ -727,3 +851,161 @@ def is_results_release_authorized():
     settings = ElectionSettings.objects.filter(pk=1).first()
 
     return settings is not None and settings.results_release_authorized
+
+
+def create_result_snapshot(actor, trigger):
+    """Append an immutable snapshot of the currently released result set."""
+    archived_names = []
+    archive_storage = FileSystemStorage(
+        location=Path(django_settings.PRIVATE_MEDIA_ROOT)
+        / "election_result_snapshots",
+    )
+    try:
+        with transaction.atomic():
+            election_settings = (
+                ElectionSettings.objects.select_for_update()
+                .filter(pk=1)
+                .first()
+            )
+            if (
+                election_settings is None
+                or election_settings.voting_open
+                or not election_settings.results_release_authorized
+            ):
+                raise ValidationError(
+                    "Só é possível versionar resultados divulgados após o encerramento."
+                )
+
+            vote_tally = get_vote_tally()
+            compatibility_tally = get_compatibility_tally()
+            compatibility_by_proposal = {
+                item["proposal_id"]: item
+                for item in compatibility_tally["proposals"]
+            }
+            proposals = []
+            image_manifest = {}
+            for result in vote_tally["proposals"]:
+                proposal_id = result["proposal_id"]
+                compatibility = compatibility_by_proposal[proposal_id]
+                proposal = ShirtProposal.objects.get(pk=proposal_id)
+                image_url = reverse(
+                    "result-snapshot-image",
+                    args=[0, proposal_id],
+                )
+                proposals.append({
+                    **result,
+                    "image_url": image_url,
+                    "compatibility": compatibility["average_compatibility"],
+                    "valid_assessments": compatibility["valid_assessments"],
+                })
+
+            payload = {
+                "status": vote_tally["status"],
+                "total_votes": vote_tally["total_votes"],
+                "excluded_votes": vote_tally["excluded_votes"],
+                "excluded_proposals": vote_tally["excluded_proposals"],
+                "proposals": proposals,
+                "winners": vote_tally["winners"],
+                "is_tie": vote_tally["is_tie"],
+                "survey_results": get_preference_tally(),
+                "compatibility_status": compatibility_tally["status"],
+                "compatibility_winners": compatibility_tally["winners"],
+                "compatibility_is_tie": compatibility_tally["is_tie"],
+            }
+            latest = ElectionResultSnapshot.objects.order_by(
+                "-sequence"
+            ).first()
+            sequence = latest.sequence + 1 if latest else 1
+
+            for proposal in ShirtProposal.objects.filter(
+                pk__in=[
+                    result["proposal_id"]
+                    for result in vote_tally["proposals"]
+                ]
+            ):
+                if not proposal.image or not proposal.image.name:
+                    continue
+                with proposal.image.storage.open(proposal.image.name, "rb") as source:
+                    image_bytes = source.read()
+                image_format = get_proposal_image_format(
+                    ContentFile(image_bytes)
+                )
+                content_type, extension = {
+                    "JPEG": ("image/jpeg", "jpg"),
+                    "PNG": ("image/png", "png"),
+                    "WEBP": ("image/webp", "webp"),
+                }.get(image_format, (None, None))
+                if content_type is None:
+                    raise ValidationError("Formato de imagem de proposta inválido.")
+                digest = hashlib.sha256(image_bytes).hexdigest()
+                name = archive_storage.save(
+                    f"version-{sequence}/proposal-{proposal.pk}.{extension}",
+                    ContentFile(image_bytes),
+                )
+                archived_names.append(name)
+                image_manifest[str(proposal.pk)] = {
+                    "name": name,
+                    "sha256": digest,
+                    "content_type": content_type,
+                }
+
+            for item in payload["proposals"]:
+                item["image_url"] = reverse(
+                    "result-snapshot-image",
+                    args=[sequence, item["proposal_id"]],
+                )
+
+            payload = json.loads(
+                json.dumps(payload, cls=DjangoJSONEncoder)
+            )
+            encoded_payload = json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+            payload_digest = hashlib.sha256(encoded_payload).hexdigest()
+            state_payload = json.loads(json.dumps(payload))
+            for item in state_payload["proposals"]:
+                item.pop("image_url", None)
+            state_assets = {
+                proposal_id: value["sha256"]
+                for proposal_id, value in image_manifest.items()
+            }
+            state_digest = hashlib.sha256(
+                json.dumps(
+                    {"payload": state_payload, "assets": state_assets},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest()
+
+            if latest and latest.state_sha256 == state_digest:
+                for name in archived_names:
+                    archive_storage.delete(name)
+                return latest
+
+            snapshot = ElectionResultSnapshot(
+                sequence=sequence,
+                payload=payload,
+                image_manifest=image_manifest,
+                payload_sha256=payload_digest,
+                state_sha256=state_digest,
+                actor=actor if getattr(actor, "is_authenticated", False) else None,
+                actor_identifier=(
+                    actor.pk if getattr(actor, "is_authenticated", False) else None
+                ),
+                trigger=trigger,
+                previous=latest,
+            )
+            snapshot.save()
+            return snapshot
+    except Exception:
+        for name in archived_names:
+            archive_storage.delete(name)
+        raise
+
+
+def get_result_snapshot(sequence):
+    return ElectionResultSnapshot.objects.filter(sequence=sequence).first()

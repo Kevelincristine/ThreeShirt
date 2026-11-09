@@ -20,6 +20,10 @@ export const router = createBrowserRouter([
       { index: true, element: <HomePage /> },
       { path: "login", element: <StudentLoginPage /> },
       {
+        path: "first-access",
+        element: <StudentLoginPage firstAccess key="first-access" />,
+      },
+      {
         path: "student",
         element: (
           <RequireStudent allowAdmin>

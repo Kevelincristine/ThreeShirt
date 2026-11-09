@@ -7,7 +7,7 @@
     "dev": "vite --host 0.0.0.0 --strictPort",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run tests/ui && node --experimental-strip-types --test tests/loginCodeRequest.test.mjs tests/studentApi.test.mjs"
+    "test": "vitest run tests/ui && node --experimental-strip-types --test tests/studentApi.test.mjs"
   },
   "dependencies": {
     "react": "^19.1.1",

@@ -4,7 +4,7 @@ from django.contrib import admin
 from django.contrib.auth import get_user_model
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 
-from .models import UserProfile, EmailLoginCode
+from .models import AccountAdminAudit, UserProfile
 
 User = get_user_model()
 
@@ -43,7 +43,7 @@ class UserProfileInline(admin.StackedInline):
         return True
 
     def get_readonly_fields(self, request, obj=None):
-        return ("user", "full_name", "role")
+        return ("user", "full_name", "role", "credential_revision")
 
 
 class CustomUserAdmin(BaseUserAdmin):
@@ -51,36 +51,36 @@ class CustomUserAdmin(BaseUserAdmin):
     list_display = ("username", "email", "is_active", "is_staff")
     search_fields = ("username", "email")
 
-
-three_shirt_admin.register(User, CustomUserAdmin)
-three_shirt_admin.register(UserProfile)
-
-
-class EmailLoginCodeAdmin(admin.ModelAdmin):
-    list_display = (
-        "email",
-        "created_at",
-        "expires_at",
-        "used_at",
-        "attempts",
-    )
-
-    search_fields = ("email",)
-
-    readonly_fields = (
-        "email",
-        "code_hash",
-        "created_at",
-        "expires_at",
-        "used_at",
-        "attempts",
-    )
-
     def has_add_permission(self, request):
         return False
 
     def has_change_permission(self, request, obj=None):
         return False
 
+    def has_delete_permission(self, request, obj=None):
+        return False
 
-three_shirt_admin.register(EmailLoginCode, EmailLoginCodeAdmin)
+    def has_view_permission(self, request, obj=None):
+        return True
+
+
+three_shirt_admin.register(User, CustomUserAdmin)
+class ReadOnlyModelAdmin(admin.ModelAdmin):
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+class AuditEventAdmin(ReadOnlyModelAdmin):
+    list_display = ("action", "actor_identifier", "target_identifier", "created_at")
+    list_filter = ("action",)
+    readonly_fields = tuple(field.name for field in AccountAdminAudit._meta.fields)
+
+
+three_shirt_admin.register(UserProfile, ReadOnlyModelAdmin)
+three_shirt_admin.register(AccountAdminAudit, AuditEventAdmin)

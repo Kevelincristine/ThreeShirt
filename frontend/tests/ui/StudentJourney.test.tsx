@@ -26,6 +26,7 @@ import {
   ApiError,
   castStudentVote,
   confirmAdminMaintenance,
+  changePassword,
   getApprovedStudentProposals,
   getAdminDashboard,
   getAdminProposals,
@@ -38,13 +39,13 @@ import {
   getStudentSubmissions,
   logoutSession,
   previewAdminMaintenance,
-  requestLoginCode,
+  loginWithPassword,
+  setFirstAccessPassword,
   saveStudentPreferences,
   submitStudentProposal,
   updateAdminStage,
   updateAdminUserRole,
   updateAdminUserStatus,
-  verifyLoginCode,
 } from "../../src/services/api";
 
 vi.mock("../../src/services/api", () => ({
@@ -55,6 +56,7 @@ vi.mock("../../src/services/api", () => ({
   },
   castStudentVote: vi.fn(),
   confirmAdminMaintenance: vi.fn(),
+  changePassword: vi.fn(),
   getApprovedStudentProposals: vi.fn(),
   getAdminDashboard: vi.fn(),
   getAdminProposals: vi.fn(),
@@ -67,13 +69,13 @@ vi.mock("../../src/services/api", () => ({
   getStudentSubmissions: vi.fn(),
   logoutSession: vi.fn(),
   previewAdminMaintenance: vi.fn(),
-  requestLoginCode: vi.fn(),
+  loginWithPassword: vi.fn(),
+  setFirstAccessPassword: vi.fn(),
   saveStudentPreferences: vi.fn(),
   submitStudentProposal: vi.fn(),
   updateAdminStage: vi.fn(),
   updateAdminUserRole: vi.fn(),
   updateAdminUserStatus: vi.fn(),
-  verifyLoginCode: vi.fn(),
 }));
 
 const dashboard = {
@@ -161,7 +163,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-test("successful student login opens the panel directly", async () => {
+test("successful password login opens the student panel", async () => {
   const user = userEvent.setup();
   vi.mocked(getSession)
     .mockResolvedValueOnce({ authenticated: false })
@@ -169,11 +171,7 @@ test("successful student login opens the panel directly", async () => {
       authenticated: true,
       user: { id: 5, email: "student@school.test", role: "student" },
     });
-  vi.mocked(requestLoginCode).mockResolvedValue({
-    state: "enter_code",
-    message: "Código enviado.",
-  });
-  vi.mocked(verifyLoginCode).mockResolvedValue({
+  vi.mocked(loginWithPassword).mockResolvedValue({
     message: "Login realizado com sucesso.",
   });
 
@@ -189,22 +187,106 @@ test("successful student login opens the panel directly", async () => {
   );
 
   await user.type(
-    await screen.findByLabelText("E-mail escolar"),
+    await screen.findByLabelText("Gmail autorizado"),
     "student@school.test",
   );
-  await user.click(screen.getByRole("button", { name: "Solicitar código" }));
-  await user.type(
-    await screen.findByLabelText("Código de verificação"),
-    "123456",
-  );
-  await user.click(screen.getByRole("button", { name: "Verificar código" }));
+  await user.type(screen.getByLabelText("Senha"), "TestPassword!123");
+  await user.click(screen.getByRole("button", { name: "Entrar" }));
 
   expect(await screen.findByText("Painel depois do login")).toBeTruthy();
-  expect(verifyLoginCode).toHaveBeenCalledWith(
+  expect(screen.queryByRole("button", { name: "Primeiro acesso" })).toBeNull();
+  expect(loginWithPassword).toHaveBeenCalledWith(
     "student@school.test",
-    "123456",
+    "TestPassword!123",
   );
 });
+
+test("first access sets a password for an existing account without approval", async () => {
+  const user = userEvent.setup();
+  vi.mocked(setFirstAccessPassword).mockResolvedValue({
+    message: "Senha definida. Entre com seu e-mail e a nova senha.",
+  });
+
+  render(
+    <MemoryRouter initialEntries={["/login"]}>
+      <AuthProvider>
+        <Routes>
+          <Route element={<StudentLoginPage />} path="/login" />
+          <Route
+            element={<StudentLoginPage firstAccess key="first-access" />}
+            path="/first-access"
+          />
+        </Routes>
+      </AuthProvider>
+    </MemoryRouter>,
+  );
+
+  await user.click(
+    await screen.findByRole("link", {
+      name: "Primeiro acesso? Defina sua senha",
+    }),
+  );
+  expect(await screen.findByRole("heading", { name: "Primeiro acesso" }))
+    .toBeTruthy();
+
+  await user.type(
+    screen.getByLabelText("Gmail autorizado"),
+    "student@school.test",
+  );
+  await user.type(screen.getByLabelText("Nova senha"), "TestPassword!123");
+  await user.type(screen.getByLabelText("Confirmar nova senha"), "TestPassword!123");
+  await user.click(screen.getByRole("button", { name: "Definir senha" }));
+
+  expect(await screen.findByText(
+    "Senha definida. Entre com seu e-mail e a nova senha.",
+  )).toBeTruthy();
+  expect(setFirstAccessPassword).toHaveBeenCalledWith(
+    "student@school.test",
+    "TestPassword!123",
+    "TestPassword!123",
+  );
+  expect(screen.getByRole("button", { name: "Entrar" })).toBeTruthy();
+  expect(screen.queryByText(/aprovação|aguardando/i)).toBeNull();
+});
+
+test.each([
+  ["admin", "/admin", "Painel administrativo"],
+  ["student_admin", "/student", "Painel estudante-administrador"],
+] as const)(
+  "successful %s login redirects to its role-appropriate panel",
+  async (role, destination, panel) => {
+    const user = userEvent.setup();
+    vi.mocked(getSession)
+      .mockResolvedValueOnce({ authenticated: false })
+      .mockResolvedValueOnce({
+        authenticated: true,
+        user: { id: 8, email: `${role}@school.test`, role },
+      });
+    vi.mocked(loginWithPassword).mockResolvedValue({
+      message: "Login realizado com sucesso.",
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/login"]}>
+        <AuthProvider>
+          <Routes>
+            <Route element={<StudentLoginPage />} path="/login" />
+            <Route element={<p>{panel}</p>} path={destination} />
+          </Routes>
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    await user.type(
+      await screen.findByLabelText("Gmail autorizado"),
+      `${role}@school.test`,
+    );
+    await user.type(screen.getByLabelText("Senha"), "TestPassword!123");
+    await user.click(screen.getByRole("button", { name: "Entrar" }));
+
+    expect(await screen.findByText(panel)).toBeTruthy();
+  },
+);
 
 test("logout asks for confirmation and cancel keeps the session active", async () => {
   const user = userEvent.setup();
@@ -374,6 +456,7 @@ test("a student administrator keeps student actions on both student panels", asy
     </MemoryRouter>,
   );
   expect(await screen.findByRole("link", { name: "Responder pesquisa" })).toBeTruthy();
+  expect(screen.getByLabelText("Senha atual")).toBeTruthy();
   expect(screen.getByText("Sem voto registrado")).toBeTruthy();
 
   cleanup();
@@ -387,9 +470,9 @@ test("a student administrator keeps student actions on both student panels", asy
   expect(await screen.findByRole("button", { name: "Votar nesta proposta" })).toBeTruthy();
 });
 
-test("admin user management offers all roles and shows account activation state", async () => {
+test("admin user management offers role controls without first-access credentials", async () => {
   const user = userEvent.setup();
-  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  const prompt = vi.spyOn(window, "prompt").mockReturnValue("Validação administrativa");
   vi.mocked(getSession).mockResolvedValue({
     authenticated: true,
     user: { id: 8, email: "admin@school.test", role: "admin" },
@@ -426,6 +509,8 @@ test("admin user management offers all roles and shows account activation state"
       role: "STUDENT",
       is_active: true,
       is_staff: false,
+      has_password: true,
+      has_participation: false,
     },
     {
       id: 45,
@@ -434,9 +519,24 @@ test("admin user management offers all roles and shows account activation state"
       role: "STUDENT_ADMIN",
       is_active: false,
       is_staff: false,
+      has_password: false,
+      has_participation: true,
+    },
+    {
+      id: 46,
+      email: "new-student@school.test",
+      full_name: "Novo estudante",
+      role: "STUDENT",
+      is_active: true,
+      is_staff: false,
+      has_password: false,
+      has_participation: false,
     },
   ]);
   vi.mocked(updateAdminUserRole).mockResolvedValue({ message: "Atualizado." });
+  vi.mocked(changePassword).mockResolvedValue({
+    message: "Senha alterada com sucesso.",
+  });
 
   render(
     <MemoryRouter>
@@ -446,17 +546,42 @@ test("admin user management offers all roles and shows account activation state"
     </MemoryRouter>,
   );
 
-  expect(await screen.findByText("Conta ativa")).toBeTruthy();
+  expect(await screen.findAllByText("Conta ativa")).toHaveLength(2);
   expect(screen.getByRole("heading", { name: "Zona de Manutenção" })).toBeTruthy();
   expect(screen.getByText("Conta inativa")).toBeTruthy();
   expect(screen.getByText("Estudante e administrador")).toBeTruthy();
-  await user.click(screen.getByRole("button", {
+  await user.type(screen.getByLabelText("Senha atual"), "Initial-secret");
+  await user.type(screen.getByLabelText("Nova senha"), "Replacement-secret-78!");
+  await user.type(
+    screen.getByLabelText("Confirmar nova senha"),
+    "Replacement-secret-78!",
+  );
+  await user.click(screen.getByRole("button", { name: "Alterar senha" }));
+  await waitFor(() => {
+    expect(changePassword).toHaveBeenCalledWith(
+      "Initial-secret",
+      "Replacement-secret-78!",
+      "Replacement-secret-78!",
+    );
+  });
+
+  const studentUser = screen.getByText("student@school.test").closest("article")!;
+  await user.click(within(studentUser).getByRole("button", {
     name: "Definir: Estudante e administrador",
   }));
   await waitFor(() => {
-    expect(updateAdminUserRole).toHaveBeenCalledWith(44, "STUDENT_ADMIN");
+    expect(updateAdminUserRole).toHaveBeenCalledWith(
+      44,
+      "STUDENT_ADMIN",
+      "Validação administrativa",
+    );
   });
-  confirm.mockRestore();
+  expect(
+    screen.queryByRole("button", {
+      name: "Emitir credencial de primeiro acesso",
+    }),
+  ).toBeNull();
+  prompt.mockRestore();
 });
 
 test("a student administrator can see the admin dashboard but not maintenance controls", async () => {
@@ -499,13 +624,16 @@ test("a student administrator can see the admin dashboard but not maintenance co
   );
 
   expect(await screen.findByRole("heading", { name: "Painel administrativo" })).toBeTruthy();
-  expect(screen.queryByRole("heading", { name: "Zona de Manutenção" })).toBeNull();
-  expect(screen.queryByRole("button", { name: /reinicialização eleitoral/i })).toBeNull();
+  expect(screen.getByRole("heading", { name: "Zona de Manutenção" })).toBeTruthy();
+  expect(
+    screen.queryByRole("button", { name: /reinicialização eleitoral/i }),
+  ).toBeNull();
 });
 
-test("admin maintenance requires a preview before the final account deletion", async () => {
+test("admin account reset requires a justified preview before confirmation", async () => {
   const user = userEvent.setup();
   vi.spyOn(window, "confirm").mockReturnValue(true);
+  vi.spyOn(window, "prompt").mockReturnValue("Conta transferida mediante registro");
   vi.mocked(getSession).mockResolvedValue({
     authenticated: true,
     user: { id: 8, email: "admin@school.test", role: "admin" },
@@ -542,30 +670,32 @@ test("admin maintenance requires a preview before the final account deletion", a
       role: "STUDENT",
       is_active: true,
       is_staff: false,
+      has_password: true,
+      has_participation: true,
     },
   ]);
   vi.mocked(previewAdminMaintenance).mockResolvedValue({
     challenge_token: "one-time-token",
     expires_at: "2026-10-31T12:00:00-03:00",
-    action: "DELETE_USER",
+    action: "RESET_USER_BASIC",
     target: {
       id: 44,
       label: "Estudante",
       email: "student@school.test",
     },
     summary: {
-      accounts: 1,
-      profiles: 1,
-      preference_responses: 1,
-      proposals: 1,
-      votes: 2,
-      proposal_images: 1,
+      account_preserved: 1,
+      email_preserved: 1,
+      profiles_reset: 1,
+      responses_preserved: 1,
+      votes_preserved: 2,
+      proposals_preserved: 1,
     },
     warning: "",
   });
   vi.mocked(confirmAdminMaintenance).mockResolvedValue({
-    message: "Conta e registros relacionados excluídos.",
-    affected: { accounts: 1, proposals: 1, votes: 2 },
+    message: "Conta reinicializada; o histórico eleitoral foi preservado.",
+    affected: { account_preserved: 1, responses_preserved: 1, votes_preserved: 2 },
     warning: "",
     file_cleanup_pending: false,
   });
@@ -582,12 +712,26 @@ test("admin maintenance requires a preview before the final account deletion", a
     await screen.findByLabelText("Conta"),
     "44",
   );
-  await user.click(screen.getByRole("button", { name: "Revisar exclusão da conta" }));
+  await user.type(
+    screen.getByLabelText("Justificativa obrigatória"),
+    "Conta transferida mediante registro",
+  );
+  await user.click(
+    screen.getByRole("button", {
+      name: "Revisar reinicialização preservando histórico",
+    }),
+  );
   await waitFor(() => {
-    expect(previewAdminMaintenance).toHaveBeenCalledWith("delete_user", 44);
+    expect(previewAdminMaintenance).toHaveBeenCalledWith(
+      "reset_user_basic",
+      44,
+      "Conta transferida mediante registro",
+    );
   });
-  expect(await screen.findByText("Votos excluídos")).toBeTruthy();
-  expect(screen.getByRole("button", { name: "Confirmar definitivamente" })).toBeTruthy();
+  expect(await screen.findByText("Votos históricos preservados")).toBeTruthy();
+  await user.click(
+    screen.getByLabelText("Li a prévia e autorizo explicitamente esta operação."),
+  );
   await user.click(screen.getByRole("button", { name: "Confirmar definitivamente" }));
   await waitFor(() => {
     expect(confirmAdminMaintenance).toHaveBeenCalledWith("one-time-token", "");

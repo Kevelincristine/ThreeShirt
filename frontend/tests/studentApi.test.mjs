@@ -66,6 +66,54 @@ test("preferences use the authenticated endpoint and submit CSRF-protected JSON"
   }
 });
 
+test("login, first access, and own-password change use CSRF-protected endpoints", async () => {
+  const calls = [];
+  const restore = setFetch(async (url, init) => {
+    calls.push({ path: new URL(String(url)).pathname, init });
+    if (new URL(String(url)).pathname.endsWith("/csrf/")) {
+      return mockResponse({ csrfToken: "server-csrf-token" });
+    }
+    return mockResponse({ message: "Solicitação registrada." });
+  });
+  try {
+    await api.loginWithPassword("student@gmail.com", "Student-password-42!");
+    await api.setFirstAccessPassword(
+      "student@gmail.com",
+      "Replacement-password-73!",
+      "Replacement-password-73!",
+    );
+    await api.changePassword(
+      "Student-password-42!",
+      "Replacement-password-73!",
+      "Replacement-password-73!",
+    );
+
+    const posts = calls.filter((call) => call.init.method === "POST");
+    assert.deepEqual(posts.map((call) => call.path), [
+      "/api/accounts/login/",
+      "/api/accounts/first-access/",
+      "/api/accounts/password/change/",
+    ]);
+    assert.equal(posts[0].init.headers.get("X-CSRFToken"), "server-csrf-token");
+    assert.deepEqual(JSON.parse(posts[0].init.body), {
+      email: "student@gmail.com",
+      password: "Student-password-42!",
+    });
+    assert.deepEqual(JSON.parse(posts[1].init.body), {
+      email: "student@gmail.com",
+      password: "Replacement-password-73!",
+      password_confirmation: "Replacement-password-73!",
+    });
+    assert.deepEqual(JSON.parse(posts[2].init.body), {
+      current_password: "Student-password-42!",
+      new_password: "Replacement-password-73!",
+      password_confirmation: "Replacement-password-73!",
+    });
+  } finally {
+    restore();
+  }
+});
+
 test("proposal submission sends multipart form data with CSRF and approved list is read separately", async () => {
   const calls = [];
   const restore = setFetch(async (url, init) => {
@@ -333,6 +381,8 @@ test("admin API preserves hybrid roles and accepts results release controls", as
           role: "STUDENT_ADMIN",
           is_active: true,
           is_staff: false,
+          has_password: true,
+          has_participation: false,
         }],
       });
     }
@@ -341,9 +391,12 @@ test("admin API preserves hybrid roles and accepts results release controls", as
   try {
     const users = await api.getAdminUsers();
     assert.equal(users[0].role, "STUDENT_ADMIN");
-    await api.updateAdminUserRole(32, "STUDENT_ADMIN");
+    await api.updateAdminUserRole(32, "STUDENT_ADMIN", "Aprovado");
     await api.updateAdminStage("results_release", "open");
-    assert.deepEqual(JSON.parse(calls[1].init.body), { role: "STUDENT_ADMIN" });
+    assert.deepEqual(JSON.parse(calls[1].init.body), {
+      role: "STUDENT_ADMIN",
+      reason: "Aprovado",
+    });
     assert.deepEqual(JSON.parse(calls[2].init.body), {
       stage: "results_release",
       action: "open",
@@ -353,7 +406,7 @@ test("admin API preserves hybrid roles and accepts results release controls", as
   }
 });
 
-test("maintenance API performs server preview and one-time confirmation requests", async () => {
+test("account reset API sends a reasoned preview and one-time confirmation", async () => {
   const calls = [];
   const restore = setFetch(async (url, init) => {
     calls.push({ url: String(url), init });
@@ -361,54 +414,103 @@ test("maintenance API performs server preview and one-time confirmation requests
       return mockResponse({
         challenge_token: "server-issued-token",
         expires_at: "2026-10-31T12:00:00-03:00",
-        action: "RESET_ELECTION",
-        target: { label: "Todos os dados eleitorais" },
+        action: "RESET_USER_BASIC",
+        target: { id: 32, label: "Estudante", email: "student@school.test" },
         summary: {
-          votes: 4,
-          preference_responses: 3,
-          proposals: 2,
-          proposal_images: 2,
-          files_to_remove: 2,
-          settings_rows: 1,
-          accounts_preserved: 5,
-          profiles_preserved: 5,
-          email_login_codes_preserved: 2,
-          login_rate_buckets_preserved: 1,
+          account_preserved: 1,
+          email_preserved: 1,
+          profiles_reset: 1,
+          responses_preserved: 3,
+          votes_preserved: 4,
+          proposals_preserved: 2,
         },
         warning: "",
-        restored_settings: {
-          survey_open: false,
-          proposal_submission_open: true,
-          voting_open: false,
-          results_release_authorized: false,
-          compatibility_weight: 50,
-        },
       });
     }
     return mockResponse({
-      message: "Dados eleitorais reiniciados.",
-      affected: { votes: 4, proposals: 2 },
+      message: "Conta reinicializada; o histórico eleitoral foi preservado.",
+      affected: { votes_preserved: 4, proposals_preserved: 2 },
       warning: "",
       file_cleanup_pending: false,
     });
   });
   try {
-    const preview = await api.previewAdminMaintenance("reset_election");
+    const preview = await api.previewAdminMaintenance(
+      "reset_user_basic",
+      32,
+      "Conta transferida",
+    );
+    assert.equal(preview.action, "RESET_USER_BASIC");
+    assert.equal(preview.summary.account_preserved, 1);
+    await api.confirmAdminMaintenance(preview.challenge_token);
+    assert.deepEqual(JSON.parse(calls[0].init.body), {
+      action: "reset_user_basic",
+      target_id: 32,
+      reason: "Conta transferida",
+    });
+    assert.deepEqual(JSON.parse(calls[1].init.body), {
+      challenge_token: "server-issued-token",
+    });
+    assert.equal(calls[0].init.headers.get("X-CSRFToken"), "test-token");
+    assert.equal(calls[1].init.headers.get("X-CSRFToken"), "test-token");
+  } finally {
+    restore();
+  }
+});
+
+test("election reset API confirms the exact phrase and returns verified backup metadata", async () => {
+  const calls = [];
+  const restore = setFetch(async (url, init) => {
+    calls.push({ url: String(url), init });
+    if (String(url).endsWith("/maintenance/preview/")) {
+      return mockResponse({
+        challenge_token: "reset-token",
+        expires_at: "2026-11-08T12:00:00-03:00",
+        action: "RESET_ELECTION",
+        target: { label: "Todos os dados eleitorais" },
+        summary: {
+          proposals: 1,
+          votes: 0,
+          preference_responses: 2,
+          participation_identities_preserved: 4,
+          result_snapshots_preserved: 1,
+        },
+        warning: "Identidades e snapshots serão preservados.",
+      });
+    }
+    return mockResponse({
+      message: "Dados eleitorais reiniciados.",
+      affected: { proposals: 1 },
+      warning: "",
+      file_cleanup_pending: false,
+      backup: {
+        path: "backups/maintenance/backup.sqlite3",
+        sha256: "a".repeat(64),
+        integrity: "ok",
+      },
+    });
+  });
+  try {
+    const preview = await api.previewAdminMaintenance(
+      "reset_election",
+      undefined,
+      "Encerramento autorizado.",
+    );
     assert.equal(preview.action, "RESET_ELECTION");
-    assert.equal(preview.summary.accounts_preserved, 5);
-    await api.confirmAdminMaintenance(
+    const result = await api.confirmAdminMaintenance(
       preview.challenge_token,
       "REINICIAR ELEIÇÃO",
     );
     assert.deepEqual(JSON.parse(calls[0].init.body), {
       action: "reset_election",
+      target_id: null,
+      reason: "Encerramento autorizado.",
     });
     assert.deepEqual(JSON.parse(calls[1].init.body), {
-      challenge_token: "server-issued-token",
+      challenge_token: "reset-token",
       confirmation_phrase: "REINICIAR ELEIÇÃO",
     });
-    assert.equal(calls[0].init.headers.get("X-CSRFToken"), "test-token");
-    assert.equal(calls[1].init.headers.get("X-CSRFToken"), "test-token");
+    assert.equal(result.backup.integrity, "ok");
   } finally {
     restore();
   }

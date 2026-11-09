@@ -10,9 +10,9 @@ registrar preferências e propostas, enquanto administradores controlam a
 moderação e a votação. A compatibilidade entre preferências e propostas
 complementa a apuração dos votos, sem substituir a escolha democrática.
 
-> **Estado atual:** a jornada do estudante da Etapa 12 está integrada ao
-> backend: login por código, sessão, logout, pesquisa, envio e acompanhamento
-> de propostas, galeria aprovada, voto e consulta de resultados autorizados.
+> **Estado atual:** a jornada do estudante está integrada ao backend: login
+> por Gmail e senha, primeiro acesso e alteração de senha próprios,
+> pesquisa, propostas, voto e consulta de resultados autorizados.
 > O projeto permanece em desenvolvimento e não é um serviço de produção.
 
 ## Conteúdo
@@ -33,7 +33,11 @@ complementa a apuração dos votos, sem substituir a escolha democrática.
 
 | Área | Estado |
 | --- | --- |
-| Login por código, sessão, logout e proteção da área estudante | Implementados no backend e integrados no frontend |
+| Login por senha, sessão e logout | Contas previamente cadastradas autenticam por Gmail autorizado e senha com hash Django |
+| Primeiro acesso e alteração de senha | Primeiro acesso de conta ativa existente sem senha; cada usuário altera somente a própria senha |
+| Bloqueio, reativação e reinicialização de contas | Ações justificadas e auditadas; reinicialização básica preserva histórico eleitoral |
+| Invalidação e autorização de voto substituto | Registro preservado, auditoria obrigatória e limite de um voto válido |
+| Snapshots de resultados | Versões publicadas preservadas quando invalidações alteram a apuração |
 | Pesquisa individual de preferências | Consulta e gravação próprias disponíveis por API e formulário React; gravação depende da pesquisa aberta |
 | Cadastro e acompanhamento de propostas | Envio por API e formulário; estudante acompanha somente propostas próprias |
 | Moderação de propostas no Django Admin | Implementada |
@@ -66,29 +70,53 @@ flowchart TD
 
 ## Regras e decisões técnicas
 
-### Solicitação de códigos de login
+### Autenticação e acesso
 
-As solicitações são limitadas a três por conta e dez por origem em qualquer
-janela móvel de 60 segundos. Os identificadores de conta e origem são
-armazenados como HMAC, e os contadores são persistidos no banco para
-sincronização entre processos. A origem usa `REMOTE_ADDR`, fornecido pelo
-servidor WSGI; cabeçalhos como `X-Forwarded-For` não são considerados. Em uma
-implantação atrás de proxy, o proxy e o servidor WSGI precisam estar
-configurados para fornecer o endereço real do cliente de forma confiável.
-Um novo código é persistido inicialmente como inativo e só é ativado, junto
-com a invalidação dos anteriores, após a confirmação do envio. Se a ativação
-falhar depois do envio, o novo código permanece inativo e o anterior continua
-válido. Uma exceção do transporte não permite saber se o provedor aceitou o
-e-mail; nesse caso nenhum código novo é ativado e o código anterior é mantido.
+O login convencional exige uma conta previamente provisionada, incluída em
+`THREESHIRT_ALLOWED_EMAILS` e com senha. Não há cadastro público nem criação de
+contas pelo painel administrativo. Em **Primeiro acesso? Defina sua senha**, o
+titular informa o e-mail e define e confirma uma senha se a conta já existir,
+estiver ativa, autorizada e ainda não possuir senha. Contas ADMIN também
+precisam estar em `THREESHIRT_ADMIN_EMAILS`. O fluxo não cria conta nem altera papel,
+status ou permissões e não exige aprovação. Se a conta já tiver senha, ela não
+é alterada e a pessoa deve entrar pelo login normal.
+
+O Django armazena senhas somente com seu mecanismo de hash. O login usa e-mail
+e senha, mensagens genéricas para credenciais inválidas e limitação persistida
+de tentativas por conta e origem. Uma pessoa autenticada altera apenas a senha
+da própria conta, informando a senha atual e confirmando a nova senha. Não há
+fluxo de recuperação de senha pelo site, aprovação administrativa, códigos de
+login ou envio de e-mail. Os registros históricos de solicitações anteriores
+são preservados, mas não podem mais ser criados ou decididos pelo sistema.
+
+Para uma emergência envolvendo uma conta ADMIN, um operador com acesso local
+ao backend pode executar `python manage.py recover_admin_password`. O comando
+aceita somente uma conta Gmail existente, ativa e com papel ADMIN na lista
+`THREESHIRT_ADMIN_EMAILS`, exige confirmação explícita, justificativa e senha
+digitada sem eco no terminal. Ele não cria contas nem altera o papel, revoga
+sessões anteriores e registra a operação como recuperação local sem
+administrador autenticado.
+
+Sessões carregam a revisão das credenciais da conta; bloqueios, reativações,
+trocas de papel, trocas de senha e reinicializações incrementam essa revisão e
+invalidam sessões antigas, inclusive as persistidas em uma corrida com a
+revogação.
+
+As alterações de senha, bloqueios, reativações, papéis e reinicializações
+registram ator, alvo, data e justificativa. A reinicialização comum preserva
+respostas, propostas e votos em uma geração histórica separada. A invalidação
+eleitoral também é lógica e auditada; resultados oficiais excluem registros
+invalidados e snapshots preservam as versões anteriormente publicadas.
 
 ### Votação e apuração
 
-- Cada estudante pode registrar no máximo um voto. `Vote.student` é uma
-  relação `OneToOneField`, impondo unicidade também no banco.
+- Cada geração de participação pode ter no máximo um voto válido. Uma
+  constraint parcial no banco permite manter votos invalidados e, após
+  autorização administrativa auditada, registrar um novo voto.
 - O serviço de voto exige usuário autenticado, ativo, com perfil de estudante,
   votação aberta e proposta aprovada.
-- A apuração conta votos reais do banco e considera no ranking e no
-  denominador somente votos associados a propostas atualmente aprovadas.
+- A apuração conta somente participações elegíveis e não invalidadas;
+  snapshots encadeados preservam os resultados anteriormente publicados.
 - Se uma proposta que recebeu votos deixar de estar aprovada, seus votos não
   são apagados: são reportados separadamente como excluídos da apuração
   corrente. Essa escolha conserva o histórico sem incluir proposta inelegível
@@ -141,8 +169,8 @@ condições, os dados agregados não são retornados.
 
 ## Arquitetura
 
-- **`accounts`**: perfis e papéis de usuário, login por código temporário e
-  site administrativo restrito a e-mails autorizados.
+- **`accounts`**: perfis e papéis, autenticação por senha, primeiro acesso
+  próprio, limitação de tentativas e auditoria de contas.
 - **`election`**: preferências, propostas, votos e configuração singleton da
   eleição; serviços concentram validações, compatibilidade e apuração.
 - **Django Admin**: interface administrativa existente para moderar propostas,
@@ -151,7 +179,7 @@ condições, os dados agregados não são retornados.
   URLs públicas; a view protegida valida e entrega somente arquivos
   permitidos.
 - **Frontend**: `frontend/` contém a interface React, TypeScript e Vite, com
-  login por código, contexto de sessão e telas de preferências, propostas,
+  login por senha, primeiro acesso e telas de preferências, propostas,
   galeria/votação e resultados. O proxy de desenvolvimento encaminha `/api`
   e `/proposals` ao Django sem alterar os caminhos.
 - **Testes**: `accounts/tests.py` e `election/tests.py` verificam regras de
@@ -196,41 +224,38 @@ THREESHIRT_ADMIN_EMAILS=admin@exemplo.com
 THREESHIRT_CSRF_TRUSTED_ORIGINS=http://127.0.0.1:5173,http://localhost:5173,http://192.168.0.95:5173
 ```
 
-Cadastre a conta administrativa inicial com um e-mail incluído nas duas
-variáveis:
+Cadastre previamente cada usuário pela administração e inclua o Gmail nas
+listas adequadas. O primeiro acesso define uma senha apenas para contas já
+cadastradas, ativas e sem senha:
 
 ```powershell
 python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"
 python manage.py migrate
-python manage.py createsuperuser
 python manage.py runserver
 ```
 
-Use o valor gerado para `DJANGO_SECRET_KEY`. A aplicação só autentica e-mails
-autorizados que correspondam a usuários já cadastrados. No ambiente local, o
-backend usa SMTP por padrão; a entrega real depende da configuração de
-`EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_USE_TLS`, `EMAIL_HOST_USER`,
-`EMAIL_HOST_PASSWORD` e `DEFAULT_FROM_EMAIL` no ambiente. Para desenvolvimento
-sem envio externo, configure `EMAIL_BACKEND` como
-`django.core.mail.backends.console.EmailBackend`; nesse modo, o código é
-exibido na saída do servidor. O painel administrativo fica em
-`http://127.0.0.1:8000/admin/`;
-as rotas de autenticação são `POST /api/accounts/request-code/` e
-`POST /api/accounts/verify-code/`. O frontend obtém um token CSRF por
+Use o valor gerado para `DJANGO_SECRET_KEY`. O login aceita somente Gmail
+autorizado. Estudantes devem estar em `THREESHIRT_ALLOWED_EMAILS`;
+administradores que usarão o acesso inicial devem estar em
+`THREESHIRT_ADMIN_EMAILS` (e também na lista de login se usarem o login
+convencional).
+Configure a lista separada por vírgulas em
+`THREESHIRT_ALLOWED_EMAILS`; inclua administradores também em
+`THREESHIRT_ADMIN_EMAILS`. Não há dependência de SMTP, Brevo ou provedor de
+e-mail para autenticação. O painel administrativo fica em
+`http://127.0.0.1:8000/admin/`. As rotas principais são
+`POST /api/accounts/login/`, `POST /api/accounts/first-access/` e
+`POST /api/accounts/password/change/`.
+O frontend obtém um token CSRF por
 `GET /api/accounts/csrf/`; a origem informada em
 `THREESHIRT_CSRF_TRUSTED_ORIGINS` deve corresponder exatamente à origem do
 navegador.
 
-`POST /api/accounts/request-code/` responde com um estado estruturado:
-`unauthorized`, `account_unavailable`, `send_failed`, `rate_limited`,
-`invalid_email` ou `enter_code`. O frontend só mostra o campo do código
-quando o backend confirma `enter_code`, após o mecanismo de e-mail aceitar
-o envio. Os estados `unauthorized` e `account_unavailable` permitem
-identificar a autorização e existência de conta; esta exposição é intencional
-para atender ao fluxo de acesso solicitado e pode facilitar enumeração. As
-respostas não incluem códigos, credenciais ou detalhes SMTP. `enter_code`
-confirma aceitação pelo backend de e-mail, não entrega final na caixa postal.
-A verificação do código continua sendo feita pelo backend.
+O primeiro acesso não inicia uma sessão: depois de definir a senha, entre pelo
+formulário normal. A resposta de login não distingue conta inexistente, não
+autorizada, bloqueada ou senha incorreta. Configure
+`DJANGO_DEBUG=False` em produção para habilitar cookies `Secure`, além de
+configurar um `DJANGO_SECRET_KEY` forte e origens CSRF restritas.
 
 ### Frontend (Etapa 12)
 
@@ -260,14 +285,14 @@ npm --prefix .\frontend test
 npm --prefix .\frontend run build
 ```
 
-O login solicita um código e verifica-o por meio das views Django existentes.
+O login e o primeiro acesso usam as views Django e não enviam e-mail.
 Antes de cada POST, o cliente busca um token CSRF em
 `/api/accounts/csrf/`, envia-o no cabeçalho `X-CSRFToken` e inclui cookies de
 sessão. O proxy de desenvolvimento não contorna o `CsrfViewMiddleware`.
 Configure `THREESHIRT_CSRF_TRUSTED_ORIGINS` com as origens exatas necessárias
 em cada ambiente. Em desenvolvimento local, permita as três origens mostradas
 no exemplo; em produção, não inclua as origens do Vite.
-O login só informa sucesso quando a verificação real retorna HTTP 200.
+O frontend só informa sucesso após a criação da sessão ser confirmada por
 `GET /api/accounts/session/` consulta a sessão atual: retorna HTTP 200
 com `{"authenticated": false}` para visitantes; para usuários autenticados,
 retorna `authenticated: true` e `user` com `id`, `email` e papel (`student` ou
@@ -386,14 +411,17 @@ modelos e serviços Django existentes:
    cálculo; a API e a tela exibem somente resultados agregados autorizados.
 
 As decisões são cobertas por testes automatizados das aplicações `election`
-e `accounts`. A migration `0005` adiciona a autorização com valor inicial
-desativado; migrations locais devem ser verificadas antes de aplicação.
+e `accounts`. As migrations recentes introduzem a autenticação por senha,
+identidades eleitorais por geração, auditoria, invalidações e snapshots.
+Revise duplicidades de e-mail e faça backup verificável antes de aplicar
+migrations em qualquer banco com dados existentes.
 
 ## Próximas etapas e limites
 
 - **Etapa 11:** estrutura técnica inicial do frontend.
-- **Etapa 12:** jornada do estudante integrada, incluindo login por código,
-  sessão, logout, pesquisa, propostas, votação e resultados autorizados.
+- **Etapa de autenticação:** login por senha, primeiro acesso próprio
+  administrativa e preservação auditada do histórico eleitoral integrados à
+  interface.
 - **Limites restantes:** não há interface administrativa React; configuração,
   moderação e liberação de resultados permanecem no Django Admin. O projeto
   ainda exige configuração e revisão próprias antes de qualquer uso em

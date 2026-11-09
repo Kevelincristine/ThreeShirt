@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { Alert } from "../components/feedback/Alert";
 import { Loading } from "../components/feedback/Loading";
+import { AccountPasswordForm } from "../components/AccountPasswordForm";
 import {
   getAdminDashboard,
   getAdminProposals,
   getAdminStages,
   getAdminUsers,
+  getAdminUserHistory,
   previewAdminMaintenance,
   confirmAdminMaintenance,
   reviewAdminProposal,
@@ -19,6 +21,7 @@ import type {
   AdminMaintenancePreview,
   AdminProposal,
   AdminUser,
+  AdminUserHistory,
 } from "../types/api";
 import { useAuth } from "../app/AuthContext";
 
@@ -29,26 +32,35 @@ const roleLabels: Record<AdminUser["role"], string> = {
 };
 
 const maintenanceCountLabels: Record<string, string> = {
-  accounts: "Contas excluídas",
-  profiles: "Perfis excluídos",
-  preference_responses: "Respostas de pesquisa excluídas",
-  proposals: "Propostas excluídas",
-  votes: "Votos excluídos",
-  email_login_codes: "Códigos de acesso removidos",
-  group_memberships: "Vínculos com grupos removidos",
-  direct_permissions: "Permissões diretas removidas",
-  admin_log_entries: "Registros administrativos removidos",
-  proposal_images: "Imagens de proposta afetadas",
-  files_to_remove: "Arquivos físicos a remover",
-  votes_from_other_accounts: "Votos de outras contas afetados",
-  settings_rows: "Configurações eleitorais restauradas",
-  accounts_preserved: "Contas preservadas",
-  profiles_preserved: "Perfis preservados",
-  email_login_codes_preserved: "Códigos de acesso preservados",
-  login_rate_buckets_preserved: "Controles de limite de login preservados",
+  account_preserved: "Contas preservadas",
+  email_preserved: "E-mails preservados",
+  profiles_reset: "Perfis reinicializados",
+  responses_preserved: "Respostas históricas preservadas",
+  responses_removed: "Respostas removidas nesta reinicialização integral",
+  votes_preserved: "Votos históricos preservados",
+  votes_removed: "Votos removidos nesta reinicialização integral",
+  proposals_preserved: "Propostas preservadas",
+  proposals_removed: "Propostas removidas nesta reinicialização integral",
+  proposals_with_external_votes_preserved: "Propostas mantidas por votos de terceiros",
+  external_votes_preserved: "Votos de terceiros preservados",
+  participation_identities_preserved: "Identidades de participação preservadas",
+  participation_audit_events_preserved: "Eventos de participação preservados",
+  account_audit_events_preserved: "Auditorias administrativas preservadas",
+  result_snapshots_preserved: "Snapshots de resultados preservados",
+  maintenance_audit_events_preserved: "Auditorias de manutenção preservadas",
+  pending_replacement_authorizations_removed: "Autorizações pendentes removidas",
+  votes_from_other_participants: "Votos de outros participantes afetados",
+  accounts: "Contas que serão removidas",
+  profiles: "Perfis que serão removidos",
+  preference_responses: "Respostas que serão removidas",
+  votes: "Votos que serão removidos",
+  proposals: "Propostas que serão removidas",
+  files_to_remove: "Imagens a remover",
 };
 
 const maintenanceActionLabels: Record<AdminMaintenancePreview["action"], string> = {
+  RESET_USER_BASIC: "Reinicialização da conta com histórico preservado",
+  RESET_USER_FULL: "Reinicialização integral da participação",
   DELETE_USER: "Exclusão de conta",
   DELETE_PROPOSAL: "Exclusão de proposta",
   RESET_ELECTION: "Reinicialização eleitoral",
@@ -88,6 +100,10 @@ export function AdminDashboardPage() {
     authState.status === "authenticated" ? authState.user.id : null;
   const canMaintain =
     authState.status === "authenticated" && authState.user.role === "admin";
+  const canManageUsers =
+    authState.status === "authenticated" &&
+    (authState.user.role === "admin" ||
+      authState.user.role === "student_admin");
   const [state, setState] = useState<
     | { status: "loading" }
     | {
@@ -110,12 +126,16 @@ export function AdminDashboardPage() {
   const [selectedMaintenanceProposal, setSelectedMaintenanceProposal] = useState("");
   const [maintenancePreview, setMaintenancePreview] =
     useState<AdminMaintenancePreview | null>(null);
-  const [maintenancePhrase, setMaintenancePhrase] = useState("");
+  const [maintenanceReason, setMaintenanceReason] = useState("");
+  const [maintenanceConfirmationPhrase, setMaintenanceConfirmationPhrase] =
+    useState("");
+  const [maintenanceAcknowledged, setMaintenanceAcknowledged] = useState(false);
+  const [selectedHistory, setSelectedHistory] =
+    useState<AdminUserHistory | null>(null);
   const [maintenanceNotice, setMaintenanceNotice] = useState<{
     variant: "success" | "error";
     message: string;
   } | null>(null);
-
   const loadData = async (): Promise<void> => {
     try {
       const [dashboard, proposals, stages, users] = await Promise.all([
@@ -144,7 +164,7 @@ export function AdminDashboardPage() {
 
   useEffect(() => {
     void loadData();
-  }, []);
+  }, [canMaintain]);
 
   const pendingProposals = useMemo(
     () => state.status === "ready" ? state.proposals.filter((proposal) => proposal.status === "PENDING") : [],
@@ -208,14 +228,14 @@ export function AdminDashboardPage() {
 
   async function handleUserRole(userId: number, role: AdminUser["role"]) {
     if (pendingAction) return;
-    const result = window.confirm(
-      `Alterar o papel deste usuário para ${roleLabels[role]}?`,
-    );
-    if (!result) return;
+    const reason = window.prompt(
+      `Informe a justificativa para alterar o papel para ${roleLabels[role]}:`,
+    )?.trim();
+    if (!reason) return;
 
     setPendingAction(`role:${userId}:${role}`);
     try {
-      await updateAdminUserRole(userId, role);
+      await updateAdminUserRole(userId, role, reason);
       await loadData();
     } catch (error) {
       setState({
@@ -229,14 +249,14 @@ export function AdminDashboardPage() {
 
   async function handleUserStatus(userId: number, isActive: boolean) {
     if (pendingAction) return;
-    const result = window.confirm(
-      isActive ? "Ativar esta conta?" : "Desativar esta conta?",
-    );
-    if (!result) return;
+    const reason = window.prompt(
+      `Informe a justificativa para ${isActive ? "reativar" : "bloquear"} esta conta:`,
+    )?.trim();
+    if (!reason) return;
 
     setPendingAction(`status:${userId}:${String(isActive)}`);
     try {
-      await updateAdminUserStatus(userId, isActive);
+      await updateAdminUserStatus(userId, isActive, reason);
       await loadData();
     } catch (error) {
       setState({
@@ -253,26 +273,25 @@ export function AdminDashboardPage() {
     targetId?: number,
   ) {
     if (pendingAction) return;
-    const operationLabel =
-      action === "delete_user"
-        ? "a exclusão definitiva desta conta"
-        : action === "delete_proposal"
-          ? "a exclusão desta proposta e dos votos associados"
-          : "a reinicialização de todos os dados eleitorais";
-    if (
-      !window.confirm(
-        `Iniciar ${operationLabel}? A próxima etapa exibirá os dados afetados antes da confirmação final.`,
-      )
-    ) {
+    if (!maintenanceReason.trim()) {
+      setMaintenanceNotice({
+        variant: "error",
+        message: "Informe a justificativa antes de gerar a prévia.",
+      });
       return;
     }
 
     setPendingAction(`maintenance:preview:${action}`);
     setMaintenancePreview(null);
-    setMaintenancePhrase("");
+    setMaintenanceAcknowledged(false);
+    setMaintenanceConfirmationPhrase("");
     setMaintenanceNotice(null);
     try {
-      const preview = await previewAdminMaintenance(action, targetId);
+      const preview = await previewAdminMaintenance(
+        action,
+        targetId,
+        maintenanceReason.trim(),
+      );
       setMaintenancePreview(preview);
     } catch (error) {
       setMaintenanceNotice({
@@ -289,46 +308,66 @@ export function AdminDashboardPage() {
 
   async function confirmMaintenance() {
     if (!maintenancePreview || pendingAction) return;
-    if (
-      maintenancePreview.action === "RESET_ELECTION" &&
-      maintenancePhrase !== "REINICIAR ELEIÇÃO"
-    ) {
-      setMaintenanceNotice({
-        variant: "error",
-        message: "Digite exatamente REINICIAR ELEIÇÃO para continuar.",
-      });
-      return;
-    }
-
     setPendingAction("maintenance:confirm");
     setMaintenanceNotice(null);
     try {
       const result = await confirmAdminMaintenance(
         maintenancePreview.challenge_token,
-        maintenancePhrase,
+        maintenanceConfirmationPhrase,
       );
-      const notices = [result.message, result.warning].filter(Boolean);
+      const notices = [
+        result.message,
+        result.warning,
+        result.backup
+          ? `Backup verificado: ${result.backup.path} (SHA-256 ${result.backup.sha256}).`
+          : "",
+      ].filter(Boolean);
       if (result.file_cleanup_pending) {
         notices.push(
           "A remoção de uma ou mais imagens está pendente e requer nova tentativa administrativa.",
         );
       }
+
       setMaintenanceNotice({
         variant: "success",
         message: notices.join(" "),
       });
       setMaintenancePreview(null);
-      setMaintenancePhrase("");
+      setMaintenanceAcknowledged(false);
+      setMaintenanceConfirmationPhrase("");
       await loadData();
     } catch (error) {
       setMaintenancePreview(null);
-      setMaintenancePhrase("");
+      setMaintenanceAcknowledged(false);
+      setMaintenanceConfirmationPhrase("");
       setMaintenanceNotice({
         variant: "error",
         message:
           error instanceof Error
             ? error.message
             : "Não foi possível concluir a manutenção.",
+      });
+    } finally {
+      setPendingAction(null);
+    }
+  }
+
+  async function handleUserHistory(user: AdminUser) {
+    if (pendingAction) return;
+    if (selectedHistory?.user_id === user.id) {
+      setSelectedHistory(null);
+      return;
+    }
+    setPendingAction(`history:${user.id}`);
+    try {
+      setSelectedHistory(await getAdminUserHistory(user.id));
+    } catch (error) {
+      setMaintenanceNotice({
+        variant: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Não foi possível consultar o histórico da conta.",
       });
     } finally {
       setPendingAction(null);
@@ -531,6 +570,8 @@ export function AdminDashboardPage() {
         )}
       </div>
 
+      <AccountPasswordForm />
+
       <div className="admin-section">
         <h2>Usuários e permissões</h2>
         <div className="admin-list">
@@ -542,15 +583,26 @@ export function AdminDashboardPage() {
               </div>
               <p>{user.email}</p>
               <p>Conta {user.is_active ? "ativa" : "inativa"}</p>
+              <p>
+                Senha {user.has_password ? "configurada" : "ainda não configurada"} ·
+                {user.has_participation
+                  ? " possui histórico eleitoral"
+                  : " sem participação registrada"}
+              </p>
               <div className="admin-actions admin-actions--inline">
                 {(
-                  ["STUDENT", "STUDENT_ADMIN", "ADMIN"] as const
+                  canMaintain
+                    ? ["STUDENT", "STUDENT_ADMIN", "ADMIN"] as const
+                    : ["STUDENT", "STUDENT_ADMIN"] as const
                 ).filter((role) => role !== user.role).map((role) => (
                   <button
                     className="button button--secondary"
                     key={role}
                     type="button"
-                    disabled={Boolean(pendingAction)}
+                    disabled={
+                      Boolean(pendingAction) ||
+                      (!canMaintain && user.role === "ADMIN")
+                    }
                     onClick={() => void handleUserRole(user.id, role)}
                   >
                     {`Definir: ${roleLabels[role]}`}
@@ -559,18 +611,80 @@ export function AdminDashboardPage() {
                 <button
                   className="button button--secondary"
                   type="button"
-                  disabled={Boolean(pendingAction)}
+                  disabled={
+                    Boolean(pendingAction) ||
+                    (!canMaintain && user.role === "ADMIN")
+                  }
                   onClick={() => void handleUserStatus(user.id, !user.is_active)}
                 >
                   {user.is_active ? "Desativar" : "Ativar"}
                 </button>
+                <button
+                  className="button button--secondary"
+                  type="button"
+                  disabled={
+                    Boolean(pendingAction) ||
+                    (!canMaintain && user.role === "ADMIN")
+                  }
+                  onClick={() => void handleUserHistory(user)}
+                >
+                  {selectedHistory?.user_id === user.id
+                    ? "Ocultar histórico"
+                    : "Consultar histórico"}
+                </button>
               </div>
+              {selectedHistory?.user_id === user.id && (
+                <section aria-label={`Histórico de ${user.email}`}>
+                  <h3>Participações por geração</h3>
+                  {selectedHistory.participations.length === 0 ? (
+                    <p>Nenhuma participação histórica registrada.</p>
+                  ) : (
+                    <ul>
+                      {selectedHistory.participations.map((participation) => (
+                        <li key={participation.identity_id}>
+                          Geração {participation.generation} —{" "}
+                          {participation.current ? "atual" : "encerrada"};{" "}
+                          {participation.responses} respostas,{" "}
+                          {participation.votes} votos,{" "}
+                          {participation.proposals} propostas.
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <h3>Auditoria de participações</h3>
+                  {selectedHistory.participation_audit.length === 0 ? (
+                    <p>Nenhuma ação eleitoral auditada.</p>
+                  ) : (
+                    <ul>
+                      {selectedHistory.participation_audit.map((event) => (
+                        <li key={`participation-${event.id}`}>
+                          {event.action} — {event.reason} (administrador{" "}
+                          {event.actor_id}, {new Date(event.created_at).toLocaleString()})
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <h3>Auditoria da conta</h3>
+                  {selectedHistory.account_audit.length === 0 ? (
+                    <p>Nenhuma ação administrativa da conta.</p>
+                  ) : (
+                    <ul>
+                      {selectedHistory.account_audit.map((event) => (
+                        <li key={`account-${event.id}`}>
+                          {event.action} — {event.reason} (administrador{" "}
+                          {event.actor_id}, {new Date(event.created_at).toLocaleString()})
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </section>
+              )}
             </article>
           ))}
         </div>
       </div>
 
-      {canMaintain && (
+      {canManageUsers && (
         <section
           aria-labelledby="maintenance-zone-title"
           className="admin-section maintenance-zone"
@@ -579,8 +693,9 @@ export function AdminDashboardPage() {
             <p className="eyebrow">Ações irreversíveis</p>
             <h2 id="maintenance-zone-title">Zona de Manutenção</h2>
             <p>
-              Faça um backup antes de prosseguir. As prévias são calculadas no
-              servidor e expiram após 10 minutos.
+              Cada operação exige justificativa, prévia detalhada e confirmação
+              explícita. O backend cria e verifica um backup SQLite antes de
+              executar; as prévias expiram após 10 minutos.
             </p>
           </div>
 
@@ -592,10 +707,11 @@ export function AdminDashboardPage() {
 
           <div className="maintenance-grid">
             <article className="maintenance-card">
-              <h3>Excluir uma conta</h3>
+              <h3>Reinicializar uma conta</h3>
               <p>
-                Remove o perfil, respostas e votos da conta, além das propostas
-                enviadas e dos votos nelas. Nenhuma outra conta será excluída.
+                Mantém o e-mail e o username, remove a senha e redefine o perfil
+                para estudante. A reinicialização básica preserva as
+                participações eleitorais históricas.
               </p>
               <label className="form-field" htmlFor="maintenance-user">
                 Conta
@@ -614,7 +730,10 @@ export function AdminDashboardPage() {
                     <option
                       key={user.id}
                       value={user.id}
-                      disabled={user.id === currentUserId}
+                      disabled={
+                        user.id === currentUserId ||
+                        (!canMaintain && user.role === "ADMIN")
+                      }
                     >
                       {user.full_name || user.email} — {roleLabels[user.role]}
                       {user.id === currentUserId ? " (sua conta)" : ""}
@@ -622,6 +741,19 @@ export function AdminDashboardPage() {
                   ))}
                 </select>
               </label>
+              <button
+                className="button button--secondary"
+                type="button"
+                disabled={!selectedMaintenanceUser || Boolean(pendingAction)}
+                onClick={() =>
+                  void beginMaintenance(
+                    "reset_user_basic",
+                    Number(selectedMaintenanceUser),
+                  )
+                }
+              >
+                Revisar reinicialização preservando histórico
+              </button>
               <button
                 className="button button--danger"
                 type="button"
@@ -635,66 +767,95 @@ export function AdminDashboardPage() {
               >
                 Revisar exclusão da conta
               </button>
-            </article>
-
-            <article className="maintenance-card">
-              <h3>Excluir uma proposta</h3>
-              <p>
-                Pode afetar votos e resultados. Propostas pendentes, aprovadas
-                e rejeitadas podem ser selecionadas.
-              </p>
-              <label className="form-field" htmlFor="maintenance-proposal">
-                Proposta
-                <select
-                  id="maintenance-proposal"
-                  value={selectedMaintenanceProposal}
-                  onChange={(event) => {
-                    setSelectedMaintenanceProposal(event.target.value);
-                    setMaintenancePreview(null);
-                    setMaintenanceNotice(null);
-                  }}
-                  disabled={Boolean(pendingAction)}
+              {canMaintain && (
+                <button
+                  className="button button--danger"
+                  type="button"
+                  disabled={!selectedMaintenanceUser || Boolean(pendingAction)}
+                  onClick={() =>
+                    void beginMaintenance(
+                      "reset_user_full",
+                      Number(selectedMaintenanceUser),
+                    )
+                  }
                 >
-                  <option value="">Selecione uma proposta</option>
-                  {proposals.map((proposal) => (
-                    <option key={proposal.id} value={proposal.id}>
-                      {proposal.title} — {proposalStatusLabels[proposal.status]}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <button
-                className="button button--danger"
-                type="button"
-                disabled={!selectedMaintenanceProposal || Boolean(pendingAction)}
-                onClick={() =>
-                  void beginMaintenance(
-                    "delete_proposal",
-                    Number(selectedMaintenanceProposal),
-                  )
-                }
-              >
-                Revisar exclusão da proposta
-              </button>
+                  Revisar reinicialização integral
+                </button>
+              )}
             </article>
-
-            <article className="maintenance-card maintenance-card--irreversible">
-              <h3>Reiniciar eleição</h3>
-              <p>
-                Remove respostas, propostas, votos e resultados calculados.
-                Todas as contas, perfis, papéis, códigos de acesso e limites de
-                login serão preservados.
-              </p>
-              <button
-                className="button button--danger"
-                type="button"
-                disabled={Boolean(pendingAction)}
-                onClick={() => void beginMaintenance("reset_election")}
-              >
-                Revisar reinicialização eleitoral
-              </button>
-            </article>
+            {canMaintain && (
+              <>
+                <article className="maintenance-card">
+                  <h3>Gerenciar propostas</h3>
+                  <p>
+                    A prévia informa o status, os votos e os registros
+                    relacionados. Snapshots publicados e auditorias são
+                    preservados.
+                  </p>
+                  <label className="form-field" htmlFor="maintenance-proposal">
+                    Proposta
+                    <select
+                      id="maintenance-proposal"
+                      value={selectedMaintenanceProposal}
+                      onChange={(event) => {
+                        setSelectedMaintenanceProposal(event.target.value);
+                        setMaintenancePreview(null);
+                        setMaintenanceNotice(null);
+                      }}
+                      disabled={Boolean(pendingAction)}
+                    >
+                      <option value="">Selecione uma proposta</option>
+                      {proposals.map((proposal) => (
+                        <option key={proposal.id} value={proposal.id}>
+                          {proposal.title} — {proposalStatusLabels[proposal.status]}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <button
+                    className="button button--danger"
+                    type="button"
+                    disabled={!selectedMaintenanceProposal || Boolean(pendingAction)}
+                    onClick={() =>
+                      void beginMaintenance(
+                        "delete_proposal",
+                        Number(selectedMaintenanceProposal),
+                      )
+                    }
+                  >
+                    Revisar exclusão da proposta
+                  </button>
+                </article>
+                <article className="maintenance-card">
+                  <h3>Manutenção eleitoral</h3>
+                  <p>
+                    Reinicia somente dados operacionais da eleição atual.
+                    Identidades, eventos de auditoria, snapshots publicados e
+                    histórico de manutenção permanecem.
+                  </p>
+                  <button
+                    className="button button--danger"
+                    type="button"
+                    disabled={Boolean(pendingAction)}
+                    onClick={() => void beginMaintenance("reset_election")}
+                  >
+                    Revisar reinicialização eleitoral
+                  </button>
+                </article>
+              </>
+            )}
           </div>
+
+          <label className="form-field" htmlFor="maintenance-reason">
+            Justificativa obrigatória
+            <textarea
+              id="maintenance-reason"
+              maxLength={1000}
+              onChange={(event) => setMaintenanceReason(event.target.value)}
+              value={maintenanceReason}
+              required
+            />
+          </label>
 
           {maintenancePreview && (
             <div
@@ -737,23 +898,36 @@ export function AdminDashboardPage() {
               )}
               {maintenancePreview.action === "RESET_ELECTION" && (
                 <label className="form-field" htmlFor="maintenance-confirmation-phrase">
-                  Para confirmar, digite <strong>REINICIAR ELEIÇÃO</strong>
+                  Digite exatamente REINICIAR ELEIÇÃO
                   <input
-                    autoComplete="off"
                     id="maintenance-confirmation-phrase"
-                    onChange={(event) => setMaintenancePhrase(event.target.value)}
-                    value={maintenancePhrase}
+                    onChange={(event) =>
+                      setMaintenanceConfirmationPhrase(event.target.value)
+                    }
+                    value={maintenanceConfirmationPhrase}
+                    autoComplete="off"
                   />
                 </label>
               )}
+              <label className="form-field">
+                <input
+                  type="checkbox"
+                  checked={maintenanceAcknowledged}
+                  onChange={(event) =>
+                    setMaintenanceAcknowledged(event.target.checked)
+                  }
+                />
+                Li a prévia e autorizo explicitamente esta operação.
+              </label>
               <div className="admin-actions">
                 <button
                   className="button button--danger"
                   type="button"
                   disabled={
                     Boolean(pendingAction) ||
+                    !maintenanceAcknowledged ||
                     (maintenancePreview.action === "RESET_ELECTION" &&
-                      maintenancePhrase !== "REINICIAR ELEIÇÃO")
+                      maintenanceConfirmationPhrase !== "REINICIAR ELEIÇÃO")
                   }
                   onClick={() => void confirmMaintenance()}
                 >
@@ -765,8 +939,9 @@ export function AdminDashboardPage() {
                   disabled={Boolean(pendingAction)}
                   onClick={() => {
                     setMaintenancePreview(null);
-                    setMaintenancePhrase("");
                     setMaintenanceNotice(null);
+                    setMaintenanceAcknowledged(false);
+                    setMaintenanceConfirmationPhrase("");
                   }}
                 >
                   Cancelar

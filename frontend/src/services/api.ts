@@ -7,9 +7,9 @@ import type {
   AdminProposal,
   AdminProposalPreferences,
   AdminUser,
+  AdminUserHistory,
   ApiMessageResponse,
   AuthenticatedSession,
-  LoginCodeRequestResponse,
   ProposalStatus,
   SessionResponse,
   StudentDashboardResponse,
@@ -19,7 +19,6 @@ import type {
   StudentResultsResponse,
   StudentSubmission,
 } from "../types/api";
-import { isLoginCodeRequestState } from "./loginCodeRequest.ts";
 
 const API_BASE_URL = import.meta.env?.VITE_API_BASE_URL?.trim() ?? "";
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
@@ -57,27 +56,6 @@ function getMessageResponse(data: unknown, status: number): ApiMessageResponse {
     data.message.trim()
   ) {
     return { message: data.message.trim() };
-  }
-  throw new ApiError(
-    "O servidor retornou uma resposta inesperada.",
-    status,
-  );
-}
-
-function getLoginCodeRequestResponse(
-  data: unknown,
-  status: number,
-): LoginCodeRequestResponse {
-  if (
-    isRecord(data) &&
-    isLoginCodeRequestState(data.state) &&
-    typeof data.message === "string" &&
-    data.message.trim()
-  ) {
-    return {
-      state: data.state,
-      message: data.message.trim(),
-    };
   }
   throw new ApiError(
     "O servidor retornou uma resposta inesperada.",
@@ -585,7 +563,9 @@ function parseAdminUsers(data: unknown): AdminUser[] {
         user.role !== "STUDENT_ADMIN" &&
         user.role !== "ADMIN") ||
       typeof user.is_active !== "boolean" ||
-      typeof user.is_staff !== "boolean"
+      typeof user.is_staff !== "boolean" ||
+      typeof user.has_password !== "boolean" ||
+      typeof user.has_participation !== "boolean"
     ) {
       throw new ApiError("Um usuário administrativo possui dados inválidos.", 200);
     }
@@ -596,6 +576,8 @@ function parseAdminUsers(data: unknown): AdminUser[] {
       role: user.role,
       is_active: user.is_active,
       is_staff: user.is_staff,
+      has_password: user.has_password,
+      has_participation: user.has_participation,
     };
   });
 }
@@ -757,35 +739,52 @@ async function initializeCsrf(): Promise<string> {
   );
 }
 
-export async function requestLoginCode(
-  email: string,
-): Promise<LoginCodeRequestResponse> {
-  const csrfToken = await initializeCsrf();
-  const data = await apiRequest<unknown>(
-    "/api/accounts/request-code/",
-    {
-      method: "POST",
-      body: new URLSearchParams({ email }),
-    },
-    csrfToken,
-  );
-  return getLoginCodeRequestResponse(data, 200);
-}
-
-export async function verifyLoginCode(
-  email: string,
-  code: string,
+async function postAccountRequest(
+  path: string,
+  payload: Record<string, string>,
 ): Promise<ApiMessageResponse> {
   const csrfToken = await initializeCsrf();
   const data = await apiRequest<unknown>(
-    "/api/accounts/verify-code/",
+    path,
     {
       method: "POST",
-      body: new URLSearchParams({ email, code }),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
     },
     csrfToken,
   );
   return getMessageResponse(data, 200);
+}
+
+export async function loginWithPassword(
+  email: string,
+  password: string,
+): Promise<ApiMessageResponse> {
+  return postAccountRequest("/api/accounts/login/", { email, password });
+}
+
+export async function setFirstAccessPassword(
+  email: string,
+  password: string,
+  passwordConfirmation: string,
+): Promise<ApiMessageResponse> {
+  return postAccountRequest("/api/accounts/first-access/", {
+    email,
+    password,
+    password_confirmation: passwordConfirmation,
+  });
+}
+
+export async function changePassword(
+  currentPassword: string,
+  newPassword: string,
+  passwordConfirmation: string,
+): Promise<ApiMessageResponse> {
+  return postAccountRequest("/api/accounts/password/change/", {
+    current_password: currentPassword,
+    new_password: newPassword,
+    password_confirmation: passwordConfirmation,
+  });
 }
 
 export async function getSession(): Promise<SessionResponse> {
@@ -1009,16 +1008,113 @@ export async function getAdminUsers(
   return parseAdminUsers(data);
 }
 
+export async function getAdminUserHistory(
+  userId: number,
+  signal?: AbortSignal,
+): Promise<AdminUserHistory> {
+  const data = await apiRequest<unknown>(
+    `/api/election/admin/users/${userId}/history/`,
+    { signal },
+  );
+  if (
+    !isRecord(data) ||
+    typeof data.user_id !== "number" ||
+    !Array.isArray(data.participations) ||
+    !Array.isArray(data.participation_audit) ||
+    !Array.isArray(data.account_audit)
+  ) {
+    throw new ApiError("O histórico da conta recebido é inválido.", 200);
+  }
+  const participations = data.participations.map((item) => {
+    if (
+      !isRecord(item) ||
+      typeof item.identity_id !== "number" ||
+      typeof item.generation !== "number" ||
+      typeof item.label !== "string" ||
+      typeof item.current !== "boolean" ||
+      typeof item.eligible !== "boolean" ||
+      typeof item.created_at !== "string" ||
+      (item.ended_at !== null && typeof item.ended_at !== "string") ||
+      typeof item.responses !== "number" ||
+      typeof item.votes !== "number" ||
+      typeof item.proposals !== "number"
+    ) {
+      throw new ApiError("Uma geração de participação é inválida.", 200);
+    }
+    return {
+      identity_id: item.identity_id,
+      generation: item.generation,
+      label: item.label,
+      current: item.current,
+      eligible: item.eligible,
+      created_at: item.created_at,
+      ended_at: item.ended_at,
+      responses: item.responses,
+      votes: item.votes,
+      proposals: item.proposals,
+    };
+  });
+  const participationAudit = data.participation_audit.map((item) => {
+    if (
+      !isRecord(item) ||
+      typeof item.id !== "number" ||
+      typeof item.type !== "string" ||
+      typeof item.participation_id !== "number" ||
+      typeof item.action !== "string" ||
+      typeof item.reason !== "string" ||
+      typeof item.actor_id !== "number" ||
+      typeof item.created_at !== "string"
+    ) {
+      throw new ApiError("Um evento de auditoria eleitoral é inválido.", 200);
+    }
+    return {
+      id: item.id,
+      type: item.type,
+      participation_id: item.participation_id,
+      action: item.action,
+      reason: item.reason,
+      actor_id: item.actor_id,
+      created_at: item.created_at,
+    };
+  });
+  const accountAudit = data.account_audit.map((item) => {
+      if (
+        !isRecord(item) ||
+        typeof item.id !== "number" ||
+        typeof item.action !== "string" ||
+        typeof item.reason !== "string" ||
+        typeof item.actor_id !== "number" ||
+        typeof item.created_at !== "string"
+      ) {
+        throw new ApiError("Um evento de auditoria de conta é inválido.", 200);
+      }
+      return {
+        id: item.id,
+        action: item.action,
+        reason: item.reason,
+        actor_id: item.actor_id,
+        created_at: item.created_at,
+      };
+    });
+  return {
+    user_id: data.user_id,
+    participations,
+    participation_audit: participationAudit,
+    account_audit: accountAudit,
+  };
+}
+
 export async function updateAdminUserRole(
   userId: number,
   role: "ADMIN" | "STUDENT_ADMIN" | "STUDENT",
+  reason: string,
 ): Promise<{ message: string }> {
   const data = await apiRequest<unknown>(
     `/api/election/admin/users/${userId}/role/`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ role }),
+      body: JSON.stringify({ role, reason }),
     },
   );
   if (!isRecord(data) || typeof data.message !== "string") {
@@ -1030,13 +1126,14 @@ export async function updateAdminUserRole(
 export async function updateAdminUserStatus(
   userId: number,
   isActive: boolean,
+  reason: string,
 ): Promise<{ message: string }> {
   const data = await apiRequest<unknown>(
     `/api/election/admin/users/${userId}/status/`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ is_active: isActive }),
+      body: JSON.stringify({ is_active: isActive, reason }),
     },
   );
   if (!isRecord(data) || typeof data.message !== "string") {
@@ -1047,19 +1144,22 @@ export async function updateAdminUserStatus(
 
 export async function previewAdminMaintenance(
   action: AdminMaintenanceAction,
-  targetId?: number,
+  targetId: number | undefined,
+  reason: string,
 ): Promise<AdminMaintenancePreview> {
   const data = await apiRequest<unknown>(
     "/api/election/admin/maintenance/preview/",
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action, target_id: targetId }),
+      body: JSON.stringify({ action, target_id: targetId ?? null, reason }),
     },
   );
   const validOperation = (
     value: unknown,
   ): value is AdminMaintenanceOperation =>
+    value === "RESET_USER_BASIC" ||
+    value === "RESET_USER_FULL" ||
     value === "DELETE_USER" ||
     value === "DELETE_PROPOSAL" ||
     value === "RESET_ELECTION";
@@ -1140,14 +1240,36 @@ export async function confirmAdminMaintenance(
     typeof data.message !== "string" ||
     !isCountRecord(data.affected) ||
     typeof data.warning !== "string" ||
-    typeof data.file_cleanup_pending !== "boolean"
+    typeof data.file_cleanup_pending !== "boolean" ||
+    (data.backup !== undefined &&
+      (!isRecord(data.backup) ||
+        typeof data.backup.path !== "string" ||
+        typeof data.backup.sha256 !== "string" ||
+        data.backup.integrity !== "ok"))
   ) {
     throw new ApiError("A resposta à manutenção é inválida.", 200);
+  }
+  let backup: AdminMaintenanceResult["backup"];
+  if (data.backup !== undefined) {
+    if (
+      !isRecord(data.backup) ||
+      typeof data.backup.path !== "string" ||
+      typeof data.backup.sha256 !== "string" ||
+      data.backup.integrity !== "ok"
+    ) {
+      throw new ApiError("A verificação do backup recebido é inválida.", 200);
+    }
+    backup = {
+      path: data.backup.path,
+      sha256: data.backup.sha256,
+      integrity: "ok",
+    };
   }
   return {
     message: data.message,
     affected: data.affected,
     warning: data.warning,
     file_cleanup_pending: data.file_cleanup_pending,
+    backup,
   };
 }
