@@ -3,8 +3,12 @@ import hashlib
 import hmac
 import io
 import logging
+import os
 import secrets
+import shutil
 import sqlite3
+import subprocess
+import tempfile
 from contextlib import closing, nullcontext
 from datetime import timedelta
 from pathlib import Path
@@ -13,7 +17,6 @@ from django.contrib.admin.models import LogEntry
 from django.contrib.auth import get_user_model
 from django.conf import settings
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.core.files.storage import FileSystemStorage
 from django.db import DatabaseError, IntegrityError, connection, transaction
 from django.db.models import Q
 from django.http import (
@@ -67,6 +70,7 @@ from .services import (
     save_preference_response,
     submit_shirt_proposal,
 )
+from .storage import PrivateProposalStorage
 from .validators import get_proposal_image_format
 
 logger = logging.getLogger(__name__)
@@ -86,12 +90,7 @@ class MaintenanceBackupError(Exception):
     pass
 
 
-def _create_verified_database_backup():
-    if connection.vendor != "sqlite":
-        raise MaintenanceBackupError(
-            "A manutenção exige um backup SQLite verificável."
-        )
-
+def _create_verified_sqlite_backup(backup_dir, stamp):
     database_name = connection.settings_dict.get("NAME")
     if not database_name:
         raise MaintenanceBackupError(
@@ -107,21 +106,6 @@ def _create_verified_database_backup():
             "O arquivo do banco SQLite ativo não está acessível."
         )
 
-    backup_dir = Path(
-        getattr(
-            settings,
-            "MAINTENANCE_BACKUP_DIR",
-            Path(settings.BASE_DIR) / "backups" / "maintenance",
-        )
-    ).resolve()
-    try:
-        backup_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise MaintenanceBackupError(
-            "Não foi possível preparar o diretório de backup."
-        ) from exc
-
-    stamp = timezone.localtime().strftime("%Y%m%d-%H%M%S-%f")
     filename = f"threeshirt-maintenance-{stamp}-{secrets.token_hex(4)}.sqlite3"
     backup_path = backup_dir / filename
     temporary_path = backup_dir / f".{filename}.tmp"
@@ -159,16 +143,7 @@ def _create_verified_database_backup():
             raise MaintenanceBackupError(
                 "O backup final não passou na verificação de integridade."
             )
-
-        digest = hashlib.sha256()
-        with backup_path.open("rb") as backup_file:
-            for chunk in iter(lambda: backup_file.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return {
-            "path": str(backup_path),
-            "sha256": digest.hexdigest(),
-            "integrity": "ok",
-        }
+        return backup_path
     except MaintenanceBackupError:
         raise
     except (OSError, sqlite3.Error) as exc:
@@ -179,6 +154,172 @@ def _create_verified_database_backup():
     finally:
         if temporary_path.exists():
             temporary_path.unlink()
+
+
+def _postgres_environment():
+    database = connection.settings_dict
+    inherited_environment = os.environ
+    environment = {
+        name: inherited_environment[name]
+        for name in (
+            "PATH",
+            "HOME",
+            "LANG",
+            "LC_ALL",
+            "SYSTEMROOT",
+            "WINDIR",
+            "TEMP",
+            "TMP",
+        )
+        if name in inherited_environment
+    }
+    for setting_name, variable_name in (
+        ("HOST", "PGHOST"),
+        ("PORT", "PGPORT"),
+        ("USER", "PGUSER"),
+        ("PASSWORD", "PGPASSWORD"),
+        ("NAME", "PGDATABASE"),
+    ):
+        value = database.get(setting_name)
+        if value not in (None, ""):
+            environment[variable_name] = str(value)
+
+    options = database.get("OPTIONS", {})
+    for option_name, variable_name in (
+        ("sslmode", "PGSSLMODE"),
+        ("sslrootcert", "PGSSLROOTCERT"),
+        ("sslcert", "PGSSLCERT"),
+        ("sslkey", "PGSSLKEY"),
+        ("connect_timeout", "PGCONNECT_TIMEOUT"),
+    ):
+        value = options.get(option_name)
+        if value not in (None, ""):
+            environment[variable_name] = str(value)
+    return environment
+
+
+def _create_verified_postgresql_backup(backup_dir, stamp):
+    pg_dump = shutil.which("pg_dump")
+    pg_restore = shutil.which("pg_restore")
+    if not pg_dump or not pg_restore:
+        raise MaintenanceBackupError(
+            "As ferramentas pg_dump e pg_restore precisam estar instaladas."
+        )
+
+    database = connection.settings_dict
+    database_name = database.get("NAME")
+    if not database_name:
+        raise MaintenanceBackupError(
+            "Não foi possível identificar o banco PostgreSQL para o backup."
+        )
+
+    filename = f"threeshirt-maintenance-{stamp}-{secrets.token_hex(4)}.dump"
+    backup_path = backup_dir / filename
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{filename}.",
+        suffix=".tmp",
+        dir=backup_dir,
+    )
+    os.close(descriptor)
+    temporary_path = Path(temporary_name)
+    try:
+        os.chmod(temporary_path, 0o600)
+        environment = _postgres_environment()
+        command = [
+            pg_dump,
+            "--format=custom",
+            "--no-password",
+            "--file",
+            str(temporary_path),
+        ]
+        if database.get("HOST"):
+            command.extend(["--host", str(database["HOST"])])
+        if database.get("PORT"):
+            command.extend(["--port", str(database["PORT"])])
+        if database.get("USER"):
+            command.extend(["--username", str(database["USER"])])
+        command.extend(["--dbname", str(database_name)])
+
+        subprocess.run(
+            command,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=600,
+            env=environment,
+        )
+        if not temporary_path.is_file() or temporary_path.stat().st_size == 0:
+            raise MaintenanceBackupError(
+                "O backup PostgreSQL está vazio ou inacessível."
+            )
+        subprocess.run(
+            [
+                pg_restore,
+                "--list",
+                "--no-password",
+                str(temporary_path),
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=120,
+            env=environment,
+        )
+        temporary_path.replace(backup_path)
+        return backup_path
+    except MaintenanceBackupError:
+        raise
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.exception("Falha ao criar ou verificar backup PostgreSQL.")
+        raise MaintenanceBackupError(
+            "Não foi possível criar e verificar o backup PostgreSQL."
+        ) from exc
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
+
+
+def _backup_digest(backup_path):
+    digest = hashlib.sha256()
+    with backup_path.open("rb") as backup_file:
+        for chunk in iter(lambda: backup_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _create_verified_database_backup():
+    backup_dir = Path(
+        getattr(
+            settings,
+            "MAINTENANCE_BACKUP_DIR",
+            Path(settings.BASE_DIR) / "backups" / "maintenance",
+        )
+    ).resolve()
+    try:
+        backup_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise MaintenanceBackupError(
+            "Não foi possível preparar o diretório de backup."
+        ) from exc
+
+    stamp = timezone.localtime().strftime("%Y%m%d-%H%M%S-%f")
+    if connection.vendor == "sqlite":
+        backup_path = _create_verified_sqlite_backup(backup_dir, stamp)
+    elif connection.vendor == "postgresql":
+        backup_path = _create_verified_postgresql_backup(backup_dir, stamp)
+    else:
+        raise MaintenanceBackupError(
+            "O backup de manutenção não suporta este banco de dados."
+        )
+
+    return {
+        "path": str(backup_path),
+        "sha256": _backup_digest(backup_path),
+        "integrity": "ok",
+    }
+
 
 IMAGE_CONTENT_TYPES = {
     "JPEG": ("image/jpeg", "jpg"),
@@ -2882,6 +3023,7 @@ def _is_authorized_admin(request):
 
 
 @require_GET
+@never_cache
 def proposal_image(request, proposal_id):
     proposal = get_object_or_404(ShirtProposal, pk=proposal_id)
 
@@ -2962,9 +3104,8 @@ def result_snapshot_image(request, sequence, proposal_id):
     ):
         raise Http404
 
-    storage = FileSystemStorage(
-        location=Path(settings.PRIVATE_MEDIA_ROOT)
-        / "election_result_snapshots",
+    storage = PrivateProposalStorage(
+        prefix="election_result_snapshots",
     )
     try:
         image_file = storage.open(name, "rb")

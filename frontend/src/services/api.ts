@@ -137,6 +137,20 @@ function isStringArray(value: unknown): value is string[] {
   );
 }
 
+function getApiImageUrl(imageUrl: string): string {
+  if (!imageUrl.startsWith("/") || imageUrl.startsWith("//")) {
+    throw new ApiError("A URL da imagem recebida é inválida.", 200);
+  }
+  try {
+    return new URL(
+      imageUrl,
+      API_BASE_URL || window.location.origin,
+    ).toString();
+  } catch {
+    throw new ApiError("A URL da imagem recebida é inválida.", 200);
+  }
+}
+
 function isStudentPreferences(value: unknown): value is StudentPreferences {
     return (
       isRecord(value) &&
@@ -228,7 +242,7 @@ function getApprovedProposals(data: unknown): StudentProposal[] {
         author_id: proposal.author_id,
         title: proposal.title,
         description: proposal.description,
-        image_url: proposal.image_url,
+        image_url: getApiImageUrl(proposal.image_url),
         base_color: proposal.base_color,
         related_to_course: proposal.related_to_course,
         animal: proposal.animal,
@@ -312,7 +326,7 @@ function parseStudentResults(data: unknown): StudentResultsResponse {
       return {
         proposal_id: item.proposal_id,
         title: item.title,
-        image_url: item.image_url,
+        image_url: getApiImageUrl(item.image_url),
         vote_count: item.vote_count,
         percentage: getNumberOrNull(item.percentage),
         compatibility: getNumberOrNull(item.compatibility),
@@ -530,7 +544,7 @@ function parseAdminProposals(data: unknown): AdminProposal[] {
       updated_at: proposal.updated_at,
       reviewed_at: proposal.reviewed_at ?? null,
       rejection_reason: proposal.rejection_reason,
-      image_url: proposal.image_url,
+      image_url: getApiImageUrl(proposal.image_url),
       preferences,
       author: {
         id: proposal.author.id,
@@ -670,13 +684,8 @@ export async function apiRequest<T>(
   headers.set("Accept", "application/json");
 
   if (!SAFE_METHODS.has(method)) {
-    const csrfToken = csrfTokenOverride ?? getCsrfToken();
-    if (!csrfToken) {
-      throw new ApiError(
-        "Token CSRF indisponível. O backend precisa inicializá-lo antes desta ação.",
-        0,
-      );
-    }
+    const csrfToken =
+      csrfTokenOverride ?? getCsrfToken() ?? await initializeCsrf();
     headers.set("X-CSRFToken", csrfToken);
   }
 

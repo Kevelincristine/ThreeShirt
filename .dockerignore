@@ -1,0 +1,14 @@
+.git
+.env
+**/.env
+**/.venv
+**/venv
+**/__pycache__
+**/*.py[cod]
+**/*.sqlite3
+**/db-backup-*.sqlite3
+**/media
+**/private_media
+**/backups
+**/node_modules
+**/dist

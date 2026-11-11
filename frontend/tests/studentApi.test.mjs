@@ -66,6 +66,57 @@ test("preferences use the authenticated endpoint and submit CSRF-protected JSON"
   }
 });
 
+test("cross-origin writes fetch a CSRF token when the cookie is unreadable", async () => {
+  const calls = [];
+  const originalCookie = document.cookie;
+  document.cookie = "";
+  const restore = setFetch(async (url, init) => {
+    calls.push({ path: new URL(String(url)).pathname, init });
+    if (new URL(String(url)).pathname.endsWith("/csrf/")) {
+      return mockResponse({ csrfToken: "server-csrf-token" });
+    }
+    return mockResponse({
+      message: "Preferências salvas.",
+      has_preferences: true,
+      preferences: {
+        base_color: "BLACK",
+        related_to_course: true,
+        wants_animal: false,
+        preferred_animal: "",
+        preferred_colors: ["BLUE"],
+        wants_collar: true,
+        wants_phrase: false,
+        intends_to_buy: true,
+      },
+    });
+  });
+  try {
+    await api.saveStudentPreferences({
+      base_color: "BLACK",
+      related_to_course: true,
+      wants_animal: false,
+      preferred_animal: "",
+      preferred_colors: ["BLUE"],
+      wants_collar: true,
+      wants_phrase: false,
+      intends_to_buy: true,
+    });
+    assert.deepEqual(calls.map((call) => call.path), [
+      "/api/accounts/csrf/",
+      "/api/election/student/preferences/",
+    ]);
+    assert.equal(calls[0].init.credentials, "include");
+    assert.equal(calls[1].init.credentials, "include");
+    assert.equal(
+      calls[1].init.headers.get("X-CSRFToken"),
+      "server-csrf-token",
+    );
+  } finally {
+    document.cookie = originalCookie;
+    restore();
+  }
+});
+
 test("login, first access, and own-password change use CSRF-protected endpoints", async () => {
   const calls = [];
   const restore = setFetch(async (url, init) => {
@@ -307,7 +358,10 @@ test("student results parse decimal strings as aggregates without individual rec
     const results = await api.getStudentResults();
     assert.equal(results.proposals[0].percentage, 100);
     assert.equal(results.proposals[0].compatibility, 85.25);
-    assert.equal(results.proposals[0].image_url, "/proposals/4/image/");
+    assert.equal(
+      results.proposals[0].image_url,
+      "http://localhost:5173/proposals/4/image/",
+    );
     assert.equal(results.survey_results.questions[0].options[0].percentage, 100);
     assert.equal(results.total_votes, 2);
     assert.equal("student" in results.proposals[0], false);

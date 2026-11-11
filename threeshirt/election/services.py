@@ -4,15 +4,11 @@ from collections.abc import Mapping
 from decimal import Decimal, ROUND_HALF_UP
 import hashlib
 import json
-from pathlib import Path
-
-from django.conf import settings as django_settings
 from django.core.files.base import ContentFile
-from django.core.files.storage import FileSystemStorage
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.contrib.auth import get_user_model
 from django.core.serializers.json import DjangoJSONEncoder
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection, transaction
 from django.db.models import Count, F, Q
 from django.urls import reverse
 
@@ -30,6 +26,7 @@ from .models import (
     VoteReplacementAuthorization,
     get_or_create_current_identity,
 )
+from .storage import PrivateProposalStorage
 from .concurrency import run_with_sqlite_lock_retry
 from .validators import get_proposal_image_format
 
@@ -118,13 +115,18 @@ def cast_vote(user, proposal_id):
     """Register one vote for an approved proposal during an open election."""
 
     _require_student_user(user)
+    vote_started_in_existing_transaction = connection.in_atomic_block
 
     return run_with_sqlite_lock_retry(
-        lambda: _cast_vote_once(user, proposal_id)
+        lambda: _cast_vote_once(
+            user,
+            proposal_id,
+            vote_started_in_existing_transaction,
+        )
     )
 
 
-def _cast_vote_once(user, proposal_id):
+def _cast_vote_once(user, proposal_id, vote_started_in_existing_transaction=False):
     with transaction.atomic():
         settings = (
             ElectionSettings.objects
@@ -133,7 +135,12 @@ def _cast_vote_once(user, proposal_id):
             .first()
         )
 
-        if settings is None or not settings.voting_open:
+        if settings is None:
+            raise ValidationError({"voting": "A votação está fechada."})
+        if (
+            not settings.voting_open
+            and not vote_started_in_existing_transaction
+        ):
             raise ValidationError({"voting": "A votação está fechada."})
 
         _account, identity = _current_identity(user, lock=True)
@@ -856,9 +863,8 @@ def is_results_release_authorized():
 def create_result_snapshot(actor, trigger):
     """Append an immutable snapshot of the currently released result set."""
     archived_names = []
-    archive_storage = FileSystemStorage(
-        location=Path(django_settings.PRIVATE_MEDIA_ROOT)
-        / "election_result_snapshots",
+    archive_storage = PrivateProposalStorage(
+        prefix="election_result_snapshots",
     )
     try:
         with transaction.atomic():

@@ -23,6 +23,7 @@ complementa a apuração dos votos, sem substituir a escolha democrática.
 - [Arquitetura](#arquitetura)
 - [Tecnologias](#tecnologias)
 - [Executar localmente no Windows](#executar-localmente-no-windows)
+- [Produção e migração PostgreSQL](#produção-e-migração-postgresql)
 - [Frontend (Etapa 12)](#frontend-etapa-12)
 - [Testes e validação](#testes-e-validação)
 - [Estrutura do repositório](#estrutura-do-repositório)
@@ -221,7 +222,7 @@ Crie `threeshirt\.env` localmente. Não compartilhe nem versione esse arquivo:
 DJANGO_SECRET_KEY=use-uma-chave-aleatoria-local
 THREESHIRT_ALLOWED_EMAILS=admin@exemplo.com
 THREESHIRT_ADMIN_EMAILS=admin@exemplo.com
-THREESHIRT_CSRF_TRUSTED_ORIGINS=http://127.0.0.1:5173,http://localhost:5173,http://192.168.0.95:5173
+CSRF_TRUSTED_ORIGINS=http://127.0.0.1:5173,http://localhost:5173,http://192.168.0.95:5173
 ```
 
 Cadastre previamente cada usuário pela administração e inclua o Gmail nas
@@ -248,7 +249,7 @@ e-mail para autenticação. O painel administrativo fica em
 `POST /api/accounts/password/change/`.
 O frontend obtém um token CSRF por
 `GET /api/accounts/csrf/`; a origem informada em
-`THREESHIRT_CSRF_TRUSTED_ORIGINS` deve corresponder exatamente à origem do
+`CSRF_TRUSTED_ORIGINS` deve corresponder exatamente à origem do
 navegador.
 
 O primeiro acesso não inicia uma sessão: depois de definir a senha, entre pelo
@@ -256,6 +257,84 @@ formulário normal. A resposta de login não distingue conta inexistente, não
 autorizada, bloqueada ou senha incorreta. Configure
 `DJANGO_DEBUG=False` em produção para habilitar cookies `Secure`, além de
 configurar um `DJANGO_SECRET_KEY` forte e origens CSRF restritas.
+
+Para hospedar o Django no Render e o React na Vercel, configure no Render
+`DJANGO_DEBUG=False`, `DJANGO_SECRET_KEY`, `ALLOWED_HOSTS`,
+`CSRF_TRUSTED_ORIGINS` e `CORS_ALLOWED_ORIGINS` com os domínios exatos,
+sem curingas. As origens do frontend devem constar nas duas listas. Configure
+`SESSION_COOKIE_SECURE=True`, `CSRF_COOKIE_SECURE=True`,
+`SESSION_COOKIE_SAMESITE=None` e `CSRF_COOKIE_SAMESITE=None` para cookies
+entre sites diferentes; o proxy HTTPS do Render é reconhecido por
+`SECURE_PROXY_SSL_HEADER=HTTP_X_FORWARDED_PROTO,https` e
+`SECURE_SSL_REDIRECT=True`. Na Vercel, configure `VITE_API_BASE_URL` com a
+origem do backend. Não use variáveis `VITE_*` para segredos.
+
+Para imagens privadas no Supabase Storage, crie manualmente um bucket privado
+e configure no Render `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` e
+`SUPABASE_STORAGE_BUCKET`. A service role key é exclusiva do backend e nunca
+deve ser cadastrada na Vercel ou em uma variável `VITE_*`. Sem essas três
+variáveis, o desenvolvimento local continua usando `PRIVATE_MEDIA_ROOT`;
+quando configuradas, uploads e leituras passam a usar o bucket remoto. A
+integração não cria buckets nem transfere os arquivos locais existentes.
+
+### Produção e migração PostgreSQL
+
+O desenvolvimento local usa `threeshirt\db.sqlite3` quando `DATABASE_URL`
+não está definida. No Render, o backend exige `DATABASE_URL` PostgreSQL,
+`DJANGO_DEBUG=False`, hosts e origens HTTPS explícitos e a configuração do
+Storage privado. O `Dockerfile` instala `pg_dump`/`pg_restore`, coleta os
+arquivos estáticos no início do container e executa Gunicorn; migrations não
+são aplicadas automaticamente. A Vercel usa o fallback SPA em
+`frontend\vercel.json` e deve receber apenas a origem pública da API em
+`VITE_API_BASE_URL`.
+
+Configure uma cópia PostgreSQL isolada para ensaiar as migrations e a
+restauração antes da produção. Revise as migrations de e-mail para detectar
+duplicidades sem distinção entre maiúsculas/minúsculas. A migration histórica
+de imagens deve ser exercitada sem imagens no Storage de destino; não edite
+ou reaplique migrations já registradas.
+
+Para preparar os dados, pare o backend local e crie uma cópia consistente do
+SQLite com a API de backup do próprio SQLite (não copie apenas o arquivo
+enquanto o servidor estiver ativo). Copie também `media` e `private_media`;
+preserve a base original e verifique a cópia e seus arquivos antes de
+continuar. A transferência deve ser ensaiada primeiro com um PostgreSQL
+descartável já migrado e vazio:
+
+```powershell
+Set-Location .\threeshirt
+python -c "import os,sqlite3; name='sqlite-transfer-copy.sqlite3'; assert not os.path.exists(name), 'Escolha um novo nome para a cópia'; source=sqlite3.connect('file:db.sqlite3?mode=ro',uri=True); destination=sqlite3.connect(name); source.backup(destination); destination.close(); source.close()"
+Get-FileHash .\sqlite-transfer-copy.sqlite3 -Algorithm SHA256
+Copy-Item .\media C:\caminho\media -Recurse
+Copy-Item .\private_media C:\caminho\private_media -Recurse
+python manage.py transfer_sqlite_to_postgresql `
+  --source-copy C:\caminho\sqlite-transfer-copy.sqlite3 `
+  --media-root C:\caminho\media `
+  --private-media-root C:\caminho\private_media `
+  --dry-run
+```
+
+O pré-voo é somente leitura: confirma as migrations, que o destino está
+vazio, compara contagens e calcula um digest dos registros, além de verificar
+as referências e os digests das imagens dos snapshots. Após a revisão e
+autorização específica para escrever, repita sem `--dry-run`, acrescentando
+`--confirm-transfer --confirm-storage-write`. O comando não apaga a origem;
+ele preserva IDs, reajusta sequências e valida contagens e conteúdo após a
+carga. Sessões Django são excluídas, portanto usuários precisarão entrar
+novamente. Uma falha após enviar imagens pode deixar objetos órfãos no
+Storage; uma repetição aceita arquivos já existentes somente se os digests
+forem idênticos.
+
+O backup administrativo PostgreSQL cria um arquivo `pg_dump` custom e
+verifica que `pg_restore --list` consegue ler o archive. Isso não comprova
+uma restauração. `MAINTENANCE_BACKUP_DIR` precisa apontar para armazenamento
+persistente e protegido; o disco efêmero de um serviço Render gratuito não é
+um destino durável e não deve ser considerado backup. Antes de permitir
+manutenção destrutiva em produção, configure uma cópia durável fora do
+container e teste a restauração integral em um PostgreSQL descartável. Falhas
+na criação ou verificação local do backup bloqueiam a operação destrutiva.
+Mantenha também os backups próprios do provedor; o arquivo `pg_dump` não
+substitui snapshots/backup do serviço PostgreSQL.
 
 ### Frontend (Etapa 12)
 
@@ -289,7 +368,7 @@ O login e o primeiro acesso usam as views Django e não enviam e-mail.
 Antes de cada POST, o cliente busca um token CSRF em
 `/api/accounts/csrf/`, envia-o no cabeçalho `X-CSRFToken` e inclui cookies de
 sessão. O proxy de desenvolvimento não contorna o `CsrfViewMiddleware`.
-Configure `THREESHIRT_CSRF_TRUSTED_ORIGINS` com as origens exatas necessárias
+Configure `CSRF_TRUSTED_ORIGINS` com as origens exatas necessárias
 em cada ambiente. Em desenvolvimento local, permita as três origens mostradas
 no exemplo; em produção, não inclua as origens do Vite.
 O frontend só informa sucesso após a criação da sessão ser confirmada por

@@ -3,10 +3,14 @@ from datetime import timedelta
 from io import BytesIO
 from importlib import import_module
 import json
+import os
 from pathlib import Path
 from decimal import Decimal
+import subprocess
+import sys
 import threading
 import tempfile
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.contrib.admin.sites import AdminSite
@@ -15,6 +19,7 @@ from django.contrib.auth.models import AnonymousUser
 from django.contrib.sessions.models import Session
 from django.contrib.sessions.backends.db import SessionStore
 from django.core.exceptions import PermissionDenied, ValidationError
+from django.core.management import CommandError
 from django.db import (
     DatabaseError,
     IntegrityError,
@@ -30,6 +35,7 @@ from django.http import FileResponse
 from django.test import (
     Client,
     RequestFactory,
+    SimpleTestCase,
     TestCase,
     TransactionTestCase,
     override_settings,
@@ -42,6 +48,9 @@ from accounts.admin import three_shirt_admin
 from accounts.models import AccountAdminAudit, UserProfile
 
 from .admin import ElectionSettingsAdmin, ShirtProposalAdmin
+from .management.commands.transfer_sqlite_to_postgresql import (
+    Command as SQLiteToPostgreSQLTransferCommand,
+)
 from .models import (
     ElectionSettings,
     ElectionResultSnapshot,
@@ -70,7 +79,13 @@ from .services import (
     save_preference_response,
     submit_shirt_proposal,
 )
-from .views import _process_maintenance_file_cleanup, proposal_image
+from .storage import PrivateProposalStorage
+from .views import (
+    MaintenanceBackupError,
+    _create_verified_database_backup,
+    _process_maintenance_file_cleanup,
+    proposal_image,
+)
 
 User = get_user_model()
 
@@ -113,6 +128,317 @@ def make_proposal_data(image=None, **overrides):
     }
     data.update(overrides)
     return data
+
+
+class SupabaseStorageAuthorizationTests(SimpleTestCase):
+    def test_request_uses_bearer_service_role_key(self):
+        service_role_key = "test-service-role-key"
+        with override_settings(
+            SUPABASE_SERVICE_ROLE_KEY=service_role_key,
+        ), patch("election.storage.urlopen") as mocked_urlopen:
+            response = mocked_urlopen.return_value.__enter__.return_value
+            response.status = 200
+            response.read.return_value = b""
+
+            PrivateProposalStorage()._request(
+                "GET",
+                "https://storage.example/object",
+            )
+
+        request = mocked_urlopen.call_args.args[0]
+        self.assertEqual(
+            request.get_header("Authorization"),
+            f"Bearer {service_role_key}",
+        )
+
+
+class SupabaseStorageOperationsTests(SimpleTestCase):
+    @override_settings(
+        SUPABASE_STORAGE_ENABLED=True,
+        SUPABASE_URL="https://project.example.test",
+        SUPABASE_SERVICE_ROLE_KEY="storage-test-key",
+        SUPABASE_STORAGE_BUCKET="private",
+    )
+    def test_upload_read_exists_and_delete_use_private_storage_api(self):
+        storage = PrivateProposalStorage()
+        with patch.object(
+            storage,
+            "_request",
+            side_effect=[
+                (404, b""),
+                (200, b""),
+                (200, b"test image"),
+                (200, b""),
+                (200, b""),
+            ],
+        ) as request:
+            name = storage.save(
+                "proposal.png",
+                ContentFile(b"test image", name="proposal.png"),
+            )
+            with storage.open(name, "rb") as image:
+                self.assertEqual(image.read(), b"test image")
+            self.assertTrue(storage.exists(name))
+            storage.delete(name)
+
+        self.assertEqual(
+            [call.args[0] for call in request.call_args_list],
+            ["GET", "POST", "GET", "GET", "DELETE"],
+        )
+        self.assertEqual(
+            request.call_args_list[1].kwargs["extra_headers"]["x-upsert"],
+            "false",
+        )
+
+    @override_settings(
+        SUPABASE_STORAGE_ENABLED=True,
+        SUPABASE_URL="https://project.example.test",
+        SUPABASE_SERVICE_ROLE_KEY="storage-test-key",
+        SUPABASE_STORAGE_BUCKET="private",
+    )
+    def test_listdir_separates_nested_objects_and_files(self):
+        storage = PrivateProposalStorage(prefix="snapshots")
+        with patch.object(
+            storage,
+            "_request",
+            return_value=(
+                200,
+                json.dumps([
+                    {"name": "snapshots/folder/image.png"},
+                    {"name": "snapshots/result.json"},
+                ]).encode(),
+            ),
+        ) as request:
+            directories, files = storage.listdir("")
+
+        self.assertEqual(directories, ["folder"])
+        self.assertEqual(files, ["result.json"])
+        self.assertEqual(request.call_args.args[0], "POST")
+
+
+class PostgreSQLBackupTests(SimpleTestCase):
+    def test_postgresql_backup_is_dumped_and_verified_without_cli_password(self):
+        with tempfile.TemporaryDirectory() as backup_dir:
+            database = {
+                "NAME": "threeshirt_test",
+                "HOST": "db.example.test",
+                "PORT": "5432",
+                "USER": "backup_user",
+                "PASSWORD": "test-only-password",
+                "OPTIONS": {"sslmode": "require"},
+            }
+            commands = []
+
+            def run(command, **kwargs):
+                commands.append((command, kwargs))
+                if command[0] == "pg_dump":
+                    backup_path = Path(command[command.index("--file") + 1])
+                    backup_path.write_bytes(b"test PostgreSQL archive")
+                return subprocess.CompletedProcess(command, 0)
+
+            with (
+                override_settings(MAINTENANCE_BACKUP_DIR=backup_dir),
+                patch(
+                    "election.views.connection",
+                    SimpleNamespace(
+                        vendor="postgresql",
+                        settings_dict=database,
+                    ),
+                ),
+                patch(
+                    "election.views.shutil.which",
+                    side_effect=lambda command: command,
+                ),
+                patch("election.views.subprocess.run", side_effect=run),
+            ):
+                result = _create_verified_database_backup()
+
+            self.assertEqual(result["integrity"], "ok")
+            self.assertEqual(len(result["sha256"]), 64)
+            self.assertTrue(Path(result["path"]).is_file())
+            dump_command, dump_options = commands[0]
+            self.assertIn("--format=custom", dump_command)
+            self.assertNotIn(database["PASSWORD"], dump_command)
+            self.assertEqual(
+                dump_options["env"]["PGPASSWORD"],
+                database["PASSWORD"],
+            )
+            self.assertEqual(commands[1][0][1], "--list")
+
+    def test_failed_postgresql_dump_prevents_a_verified_backup_result(self):
+        with tempfile.TemporaryDirectory() as backup_dir:
+            database = {
+                "NAME": "threeshirt_test",
+                "HOST": "db.example.test",
+                "USER": "backup_user",
+                "OPTIONS": {"sslmode": "require"},
+            }
+            with (
+                override_settings(MAINTENANCE_BACKUP_DIR=backup_dir),
+                patch(
+                    "election.views.connection",
+                    SimpleNamespace(
+                        vendor="postgresql",
+                        settings_dict=database,
+                    ),
+                ),
+                patch(
+                    "election.views.shutil.which",
+                    side_effect=lambda command: command,
+                ),
+                patch(
+                    "election.views.subprocess.run",
+                    side_effect=subprocess.CalledProcessError(
+                        1,
+                        ["pg_dump"],
+                    ),
+                ),
+                patch("election.views.logger.exception"),
+            ):
+                with self.assertRaises(MaintenanceBackupError):
+                    _create_verified_database_backup()
+
+            self.assertEqual(list(Path(backup_dir).iterdir()), [])
+
+
+class PostgreSQLDatabaseSettingsTests(SimpleTestCase):
+    settings_script = (
+        "import json; from backend import settings; "
+        "print(json.dumps({"
+        "'engine': settings.DATABASES['default']['ENGINE'], "
+        "'options': settings.DATABASES['default'].get('OPTIONS', {}), "
+        "'disable_server_side_cursors': settings.DATABASES['default'].get("
+        "'DISABLE_SERVER_SIDE_CURSORS'), "
+        "'conn_max_age': settings.DATABASES['default'].get('CONN_MAX_AGE'), "
+        "'health_checks': settings.DATABASES['default'].get("
+        "'CONN_HEALTH_CHECKS')"
+        "}))"
+    )
+
+    def run_settings_import(self, *, render, database_url):
+        environment = os.environ.copy()
+        environment.update({
+            "PYTHON_DOTENV_DISABLED": "true",
+            "RENDER": "true" if render else "",
+            "DJANGO_DEBUG": "False" if render else "True",
+            "DJANGO_SECRET_KEY": "settings-test-only-key",
+            "DATABASE_URL": database_url,
+            "ALLOWED_HOSTS": "api.example.test" if render else "",
+            "CSRF_TRUSTED_ORIGINS": (
+                "https://frontend.example.test" if render else ""
+            ),
+            "CORS_ALLOWED_ORIGINS": (
+                "https://frontend.example.test" if render else ""
+            ),
+            "SESSION_COOKIE_SECURE": "True" if render else "False",
+            "CSRF_COOKIE_SECURE": "True" if render else "False",
+            "SESSION_COOKIE_SAMESITE": "None" if render else "Lax",
+            "CSRF_COOKIE_SAMESITE": "None" if render else "Lax",
+            "SECURE_PROXY_SSL_HEADER": (
+                "HTTP_X_FORWARDED_PROTO,https" if render else ""
+            ),
+            "SECURE_SSL_REDIRECT": "True" if render else "False",
+            "SUPABASE_URL": (
+                "https://project.example.test" if render else ""
+            ),
+            "SUPABASE_SERVICE_ROLE_KEY": (
+                "settings-test-only-storage-key" if render else ""
+            ),
+            "SUPABASE_STORAGE_BUCKET": "private" if render else "",
+        })
+        return subprocess.run(
+            [sys.executable, "-c", self.settings_script],
+            cwd=Path(__file__).resolve().parents[1],
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def test_local_configuration_without_database_url_uses_sqlite(self):
+        result = self.run_settings_import(render=False, database_url="")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("django.db.backends.sqlite3", result.stdout)
+
+    def test_render_requires_database_url(self):
+        result = self.run_settings_import(render=True, database_url="")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "DATABASE_URL must be configured on Render.",
+            result.stderr,
+        )
+
+    def test_render_rejects_sqlite_database_url(self):
+        result = self.run_settings_import(
+            render=True,
+            database_url="sqlite:////tmp/three-shirt-test.sqlite3",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "DATABASE_URL must use PostgreSQL on Render.",
+            result.stderr,
+        )
+
+    def test_render_postgresql_configuration_enforces_ssl_and_pool_safety(self):
+        result = self.run_settings_import(
+            render=True,
+            database_url="postgresql://test:test@db.example.test:5432/test",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        configuration = json.loads(result.stdout)
+        self.assertEqual(
+            configuration["engine"],
+            "django.db.backends.postgresql",
+        )
+        self.assertEqual(configuration["options"]["sslmode"], "require")
+        self.assertTrue(configuration["disable_server_side_cursors"])
+        self.assertEqual(configuration["conn_max_age"], 60)
+        self.assertTrue(configuration["health_checks"])
+
+
+class SQLiteToPostgreSQLTransferUnitTests(SimpleTestCase):
+    def test_fixture_digest_ignores_json_object_key_order(self):
+        first = '[{"model":"election.snapshot","fields":{"payload":{"b":2,"a":1}}}]'
+        second = '[{"model":"election.snapshot","fields":{"payload":{"a":1,"b":2}}}]'
+
+        self.assertEqual(
+            SQLiteToPostgreSQLTransferCommand._fixture_digest(first),
+            SQLiteToPostgreSQLTransferCommand._fixture_digest(second),
+        )
+
+    def test_source_file_paths_reject_absolute_and_traversal_paths(self):
+        for name in (
+            "../outside.png",
+            r"..\outside.png",
+            r"C:\outside.png",
+            r"C:outside.png",
+            "/outside.png",
+        ):
+            with self.subTest(name=name), self.assertRaises(CommandError):
+                SQLiteToPostgreSQLTransferCommand._safe_relative_path(name)
+
+    def test_source_asset_resolution_rejects_symlink_escape(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "media"
+            outside = Path(temporary_directory) / "outside.png"
+            root.mkdir()
+            outside.write_bytes(b"not an image")
+            try:
+                (root / "linked.png").symlink_to(outside)
+            except OSError as error:
+                self.skipTest(f"Symlinks are unavailable: {error}")
+
+            with self.assertRaises(CommandError):
+                SQLiteToPostgreSQLTransferCommand()._register_source_asset(
+                    {},
+                    "",
+                    "linked.png",
+                    (root,),
+                )
 
 
 @override_settings(ADMIN_EMAILS=["dashboard_admin@escola.com"])
@@ -3125,16 +3451,15 @@ class ProposalImageAccessTests(TestCase):
 
     def test_admin_can_view_pending_image_for_moderation(self):
         proposal = self.create_proposal()
-        self.client.force_login(self.admin)
-
-        response = self.client.get(self.image_url(proposal))
+        request = RequestFactory().get(self.image_url(proposal))
+        request.user = self.admin
+        response = proposal_image(request, proposal.pk)
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["Content-Type"], "image/png")
-        self.assertEqual(
-            b"".join(response.streaming_content)[:8],
-            b"\x89PNG\r\n\x1a\n",
-        )
+        image_file = response.file_to_stream
+        self.assertEqual(image_file.read(8), b"\x89PNG\r\n\x1a\n")
+        image_file.close()
 
     def test_student_cannot_view_pending_image(self):
         proposal = self.create_proposal()
@@ -3155,13 +3480,15 @@ class ProposalImageAccessTests(TestCase):
             user=hybrid,
             role=UserProfile.Role.STUDENT_ADMIN,
         )
-        self.client.force_login(hybrid)
-
-        response = self.client.get(self.image_url(proposal))
+        request = RequestFactory().get(self.image_url(proposal))
+        request.user = hybrid
+        response = proposal_image(request, proposal.pk)
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["Content-Type"], "image/png")
-        response.close()
+        image_file = response.file_to_stream
+        self.assertEqual(image_file.read(8), b"\x89PNG\r\n\x1a\n")
+        image_file.close()
 
     def test_unauthorized_staff_cannot_view_pending_image(self):
         proposal = self.create_proposal()
@@ -3200,18 +3527,16 @@ class ProposalImageAccessTests(TestCase):
 
     def test_authenticated_student_can_view_approved_image(self):
         proposal = self.create_proposal(ShirtProposal.Status.APPROVED)
-        self.client.force_login(self.student)
-
-        response = self.client.get(self.image_url(proposal))
+        request = RequestFactory().get(self.image_url(proposal))
+        request.user = self.student
+        response = proposal_image(request, proposal.pk)
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["Content-Type"], "image/png")
         self.assertEqual(response["X-Content-Type-Options"], "nosniff")
-        self.assertTrue(
-            b"".join(response.streaming_content).startswith(
-                b"\x89PNG\r\n\x1a\n"
-            )
-        )
+        image_file = response.file_to_stream
+        self.assertEqual(image_file.read(8), b"\x89PNG\r\n\x1a\n")
+        image_file.close()
 
     def test_anonymous_user_cannot_view_approved_image(self):
         proposal = self.create_proposal(ShirtProposal.Status.APPROVED)
@@ -3264,7 +3589,7 @@ class ProposalImageAccessTests(TestCase):
         self.assertEqual(response.status_code, 200)
         image_file = response.file_to_stream
         self.assertFalse(image_file.closed)
-        response.close()
+        image_file.close()
         self.assertTrue(image_file.closed)
 
     def test_invalid_image_content_is_not_delivered(self):
