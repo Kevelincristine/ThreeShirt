@@ -1469,7 +1469,7 @@ def admin_review_proposal(request, proposal_id):
                 })
             proposal = (
                 ShirtProposal.objects
-                .select_for_update()
+                .select_for_update(of=("self",))
                 .select_related("author", "author__profile")
                 .get(pk=proposal_id)
             )
@@ -1715,7 +1715,7 @@ def admin_user_permission(request, user_id):
     try:
         with transaction.atomic():
             user = (
-                User.objects.select_for_update()
+                User.objects.select_for_update(of=("self",))
                 .select_related("profile")
                 .get(pk=user_id)
             )
@@ -1843,7 +1843,7 @@ def admin_user_status(request, user_id):
 
     try:
         user = (
-            User.objects.select_for_update()
+            User.objects.select_for_update(of=("self",))
             .select_related("profile")
             .get(pk=user_id)
         )

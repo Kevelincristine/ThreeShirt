@@ -258,31 +258,54 @@ autorizada, bloqueada ou senha incorreta. Configure
 `DJANGO_DEBUG=False` em produção para habilitar cookies `Secure`, além de
 configurar um `DJANGO_SECRET_KEY` forte e origens CSRF restritas.
 
-Para hospedar o Django no Render e o React na Vercel, configure no Render
-`DJANGO_DEBUG=False`, `DJANGO_SECRET_KEY`, `ALLOWED_HOSTS`,
+Para hospedar o Django em um serviço compatível com Gunicorn e o React na
+Vercel, configure no backend
+`DJANGO_ENV=production`, `DJANGO_DATABASE=postgresql`,
+`DJANGO_STORAGE=supabase`,
+`DJANGO_DEBUG=False`, `DJANGO_SECRET_KEY`, `DATABASE_URL`, `ALLOWED_HOSTS`,
 `CSRF_TRUSTED_ORIGINS` e `CORS_ALLOWED_ORIGINS` com os domínios exatos,
 sem curingas. As origens do frontend devem constar nas duas listas. Configure
 `SESSION_COOKIE_SECURE=True`, `CSRF_COOKIE_SECURE=True`,
 `SESSION_COOKIE_SAMESITE=None` e `CSRF_COOKIE_SAMESITE=None` para cookies
-entre sites diferentes; o proxy HTTPS do Render é reconhecido por
+entre sites diferentes; o proxy HTTPS é reconhecido por
 `SECURE_PROXY_SSL_HEADER=HTTP_X_FORWARDED_PROTO,https` e
 `SECURE_SSL_REDIRECT=True`. Na Vercel, configure `VITE_API_BASE_URL` com a
 origem do backend. Não use variáveis `VITE_*` para segredos.
 
-Para imagens privadas no Supabase Storage, crie manualmente um bucket privado
-e configure no Render `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` e
-`SUPABASE_STORAGE_BUCKET`. A service role key é exclusiva do backend e nunca
-deve ser cadastrada na Vercel ou em uma variável `VITE_*`. Sem essas três
-variáveis, o desenvolvimento local continua usando `PRIVATE_MEDIA_ROOT`;
-quando configuradas, uploads e leituras passam a usar o bucket remoto. A
-integração não cria buckets nem transfere os arquivos locais existentes.
+Para imagens privadas no Supabase Storage, crie manualmente o bucket privado
+`ThreeShirt` e configure no backend `SUPABASE_URL`,
+`SUPABASE_SERVICE_ROLE_KEY` e `SUPABASE_STORAGE_BUCKET=ThreeShirt`. A
+configuração de produção falha se o nome do bucket for diferente. A service
+role key é exclusiva do backend e nunca
+deve ser cadastrada na Vercel ou em uma variável `VITE_*`. No desenvolvimento
+local, `DJANGO_STORAGE=local` (padrão) usa `PRIVATE_MEDIA_ROOT`, mesmo que as
+credenciais estejam no `.env`; configure `DJANGO_STORAGE=supabase` para
+habilitar o bucket explicitamente. Em produção, o Storage Supabase é o padrão
+e as três credenciais são obrigatórias. A integração não cria buckets nem
+transfere os arquivos locais existentes. O comando de testes sempre força
+SQLite e armazenamento local temporário, independentemente do `.env`. Para
+testes funcionais contra um PostgreSQL descartável, a opção explícita
+`THREESHIRT_TEST_DATABASE=postgresql` só aceita `127.0.0.1:55432` e o banco
+`threeshirt_test_local`; o runner cria um banco separado
+`test_threeshirt_test_local`. O Storage continua local, e `sslmode=disable` só
+é permitido nesse alvo de teste local.
 
 ### Produção e migração PostgreSQL
 
-O desenvolvimento local usa `threeshirt\db.sqlite3` quando `DATABASE_URL`
-não está definida. No Render, o backend exige `DATABASE_URL` PostgreSQL,
-`DJANGO_DEBUG=False`, hosts e origens HTTPS explícitos e a configuração do
-Storage privado. O `Dockerfile` instala `pg_dump`/`pg_restore`, coleta os
+O desenvolvimento local usa `threeshirt\db.sqlite3` por padrão.
+`DJANGO_ENV=production` ativa as proteções de produção e seleciona PostgreSQL;
+`DATABASE_URL` é obrigatória nesse modo. Também é possível selecionar
+PostgreSQL explicitamente no desenvolvimento com
+`DJANGO_DATABASE=postgresql` e uma `DATABASE_URL`; sem essa opção, o ambiente
+local continua usando SQLite mesmo que `DATABASE_URL` esteja definida.
+`DATABASE_SSLMODE` aceita `require` (padrão), `verify-ca` ou `verify-full`;
+`DATABASE_CONN_MAX_AGE` controla a vida da conexão (padrão `0`) e
+`DATABASE_DISABLE_SERVER_SIDE_CURSORS` é `True` por padrão para
+compatibilidade com poolers. O ramo de produção exige segredo forte,
+`DJANGO_DEBUG=False`, hosts e origens CORS/CSRF explícitos, cookies seguros e
+HTTPS. `DJANGO_ENV=production` habilita esse modo independentemente do
+provedor, enquanto o desenvolvimento usa SQLite por padrão. O `Dockerfile`
+define o ambiente de produção, instala `pg_dump`/`pg_restore`, coleta os
 arquivos estáticos no início do container e executa Gunicorn; migrations não
 são aplicadas automaticamente. A Vercel usa o fallback SPA em
 `frontend\vercel.json` e deve receber apenas a origem pública da API em

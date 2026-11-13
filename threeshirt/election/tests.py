@@ -301,51 +301,184 @@ class PostgreSQLBackupTests(SimpleTestCase):
             self.assertEqual(list(Path(backup_dir).iterdir()), [])
 
 
+class TestEnvironmentIsolationSettingsTests(SimpleTestCase):
+    def test_test_command_forces_local_storage_and_isolated_sqlite(self):
+        script = (
+            "import json, sys; sys.argv=['manage.py', 'test']; "
+            "from backend import settings; "
+            "print(json.dumps({"
+            "'testing': settings.TESTING, "
+            "'engine': settings.DATABASES['default']['ENGINE'], "
+            "'database': str(settings.DATABASES['default']['NAME']), "
+            "'storage': settings.SUPABASE_STORAGE_ENABLED, "
+            "'runtime_dir': settings._TEST_RUNTIME_DIR.name, "
+            "'media': str(settings.MEDIA_ROOT), "
+            "'private_media': str(settings.PRIVATE_MEDIA_ROOT), "
+            "'backups': str(settings.MAINTENANCE_BACKUP_DIR)"
+            "}))"
+        )
+        environment = os.environ.copy()
+        environment.update({
+            "PYTHON_DOTENV_DISABLED": "true",
+            "THREESHIRT_TESTING": "",
+            "THREESHIRT_TEST_DATABASE": "sqlite",
+            "DJANGO_ENV": "production",
+            "DJANGO_DATABASE": "postgresql",
+            "DJANGO_STORAGE": "supabase",
+            "DJANGO_DEBUG": "False",
+            "DATABASE_URL": (
+                "postgresql://test:test@db.example.invalid:5432/testdb"
+            ),
+            "SUPABASE_URL": "https://project.example.test",
+            "SUPABASE_SERVICE_ROLE_KEY": "test-only-storage-key",
+            "SUPABASE_STORAGE_BUCKET": "private",
+        })
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=Path(__file__).resolve().parents[1],
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        configuration = json.loads(result.stdout)
+        self.assertTrue(configuration["testing"])
+        self.assertEqual(
+            configuration["engine"],
+            "django.db.backends.sqlite3",
+        )
+        self.assertNotEqual(
+            Path(configuration["database"]).resolve(),
+            (Path(__file__).resolve().parents[1] / "db.sqlite3").resolve(),
+        )
+        self.assertFalse(configuration["storage"])
+        project_root = Path(__file__).resolve().parents[1]
+        runtime_dir = Path(configuration["runtime_dir"])
+        self.assertEqual(
+            Path(configuration["database"]).resolve().parent,
+            runtime_dir.resolve(),
+        )
+        self.assertEqual(
+            Path(configuration["media"]).resolve().parent,
+            runtime_dir.resolve(),
+        )
+        self.assertEqual(
+            Path(configuration["private_media"]).resolve().parent,
+            runtime_dir.resolve(),
+        )
+        self.assertEqual(
+            Path(configuration["backups"]).resolve(),
+            (runtime_dir / "backups").resolve(),
+        )
+        self.assertFalse(runtime_dir.exists())
+        self.assertNotEqual(
+            Path(configuration["media"]).resolve(),
+            (project_root / "media").resolve(),
+        )
+        self.assertNotEqual(
+            Path(configuration["private_media"]).resolve(),
+            (project_root / "private_media").resolve(),
+        )
+
+
 class PostgreSQLDatabaseSettingsTests(SimpleTestCase):
+    test_secret_key = (
+        "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    )
     settings_script = (
         "import json; from backend import settings; "
         "print(json.dumps({"
         "'engine': settings.DATABASES['default']['ENGINE'], "
+        "'testing': settings.TESTING, "
+        "'database_name': str(settings.DATABASES['default']['NAME']), "
+        "'test_database_name': str(settings.DATABASES['default'].get("
+        "'TEST', {}).get('NAME', '')), "
+        "'environment': settings.DJANGO_ENV, "
+        "'debug': settings.DEBUG, "
+        "'allowed_hosts': settings.ALLOWED_HOSTS, "
+        "'cors_origins': settings.CORS_ALLOWED_ORIGINS, "
+        "'csrf_origins': settings.CSRF_TRUSTED_ORIGINS, "
+        "'session_cookie_secure': settings.SESSION_COOKIE_SECURE, "
+        "'csrf_cookie_secure': settings.CSRF_COOKIE_SECURE, "
+        "'ssl_redirect': settings.SECURE_SSL_REDIRECT, "
         "'options': settings.DATABASES['default'].get('OPTIONS', {}), "
+        "'sslmode': settings.DATABASES['default'].get("
+        "'OPTIONS', {}).get('sslmode'), "
         "'disable_server_side_cursors': settings.DATABASES['default'].get("
         "'DISABLE_SERVER_SIDE_CURSORS'), "
         "'conn_max_age': settings.DATABASES['default'].get('CONN_MAX_AGE'), "
+        "'storage_backend': settings.DJANGO_STORAGE, "
+        "'storage_enabled': settings.SUPABASE_STORAGE_ENABLED, "
         "'health_checks': settings.DATABASES['default'].get("
         "'CONN_HEALTH_CHECKS')"
         "}))"
     )
 
-    def run_settings_import(self, *, render, database_url):
+    def run_settings_import(
+        self,
+        *,
+        render=False,
+        database_url="",
+        django_env=None,
+        django_database=None,
+        test_database=None,
+        overrides=None,
+    ):
+        django_env = django_env or "development"
+        is_production = django_env == "production"
         environment = os.environ.copy()
         environment.update({
             "PYTHON_DOTENV_DISABLED": "true",
             "RENDER": "true" if render else "",
-            "DJANGO_DEBUG": "False" if render else "True",
-            "DJANGO_SECRET_KEY": "settings-test-only-key",
+            "DJANGO_ENV": django_env,
+            "DJANGO_DATABASE": django_database or (
+                "postgresql" if is_production else "sqlite"
+            ),
+            "DJANGO_STORAGE": "supabase" if is_production else "local",
+            "THREESHIRT_TESTING": "1" if test_database else "",
+            "THREESHIRT_TEST_DATABASE": test_database or "sqlite",
+            "DJANGO_DEBUG": "False" if is_production else "True",
+            "DJANGO_SECRET_KEY": self.test_secret_key,
             "DATABASE_URL": database_url,
-            "ALLOWED_HOSTS": "api.example.test" if render else "",
+            "DATABASE_SSLMODE": (
+                "disable" if test_database == "postgresql" else "require"
+            ),
+            "DATABASE_CONN_MAX_AGE": "0",
+            "ALLOWED_HOSTS": (
+                "api.example.test" if is_production else ""
+            ),
             "CSRF_TRUSTED_ORIGINS": (
-                "https://frontend.example.test" if render else ""
+                "https://frontend.example.test" if is_production else ""
             ),
             "CORS_ALLOWED_ORIGINS": (
-                "https://frontend.example.test" if render else ""
+                "https://frontend.example.test" if is_production else ""
             ),
-            "SESSION_COOKIE_SECURE": "True" if render else "False",
-            "CSRF_COOKIE_SECURE": "True" if render else "False",
-            "SESSION_COOKIE_SAMESITE": "None" if render else "Lax",
-            "CSRF_COOKIE_SAMESITE": "None" if render else "Lax",
+            "SESSION_COOKIE_SECURE": (
+                "True" if is_production else "False"
+            ),
+            "CSRF_COOKIE_SECURE": "True" if is_production else "False",
+            "SESSION_COOKIE_SAMESITE": (
+                "None" if is_production else "Lax"
+            ),
+            "CSRF_COOKIE_SAMESITE": "None" if is_production else "Lax",
             "SECURE_PROXY_SSL_HEADER": (
-                "HTTP_X_FORWARDED_PROTO,https" if render else ""
+                "HTTP_X_FORWARDED_PROTO,https" if is_production else ""
             ),
-            "SECURE_SSL_REDIRECT": "True" if render else "False",
+            "SECURE_SSL_REDIRECT": (
+                "True" if is_production else "False"
+            ),
             "SUPABASE_URL": (
-                "https://project.example.test" if render else ""
+                "https://project.example.test" if is_production else ""
             ),
             "SUPABASE_SERVICE_ROLE_KEY": (
-                "settings-test-only-storage-key" if render else ""
+                "settings-test-only-storage-key" if is_production else ""
             ),
-            "SUPABASE_STORAGE_BUCKET": "private" if render else "",
+            "SUPABASE_STORAGE_BUCKET": "ThreeShirt" if is_production else "",
         })
+        if overrides:
+            environment.update(overrides)
         return subprocess.run(
             [sys.executable, "-c", self.settings_script],
             cwd=Path(__file__).resolve().parents[1],
@@ -361,30 +494,165 @@ class PostgreSQLDatabaseSettingsTests(SimpleTestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("django.db.backends.sqlite3", result.stdout)
 
-    def test_render_requires_database_url(self):
-        result = self.run_settings_import(render=True, database_url="")
+    def test_postgresql_test_database_requires_explicit_local_target(self):
+        result = self.run_settings_import(
+            test_database="postgresql",
+            database_url=(
+                "postgresql://test:test@127.0.0.1:55432/"
+                "threeshirt_test_local"
+            ),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        configuration = json.loads(result.stdout)
+        self.assertTrue(configuration["testing"])
+        self.assertEqual(
+            configuration["engine"],
+            "django.db.backends.postgresql",
+        )
+        self.assertEqual(
+            configuration["database_name"],
+            "threeshirt_test_local",
+        )
+        self.assertEqual(
+            configuration["test_database_name"],
+            "test_threeshirt_test_local",
+        )
+        self.assertEqual(configuration["sslmode"], "disable")
+        self.assertEqual(configuration["storage_backend"], "local")
+        self.assertFalse(configuration["storage_enabled"])
+
+    def test_postgresql_test_database_rejects_remote_or_unexpected_target(self):
+        for database_url in (
+            "postgresql://test:test@db.example.test:55432/"
+            "threeshirt_test_local",
+            "postgresql://test:test@127.0.0.1:5432/"
+            "threeshirt_test_local",
+            "postgresql://test:test@127.0.0.1:55432/production",
+        ):
+            with self.subTest(database_url=database_url):
+                result = self.run_settings_import(
+                    test_database="postgresql",
+                    database_url=database_url,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    "PostgreSQL tests require the dedicated local test "
+                    "database.",
+                    result.stderr,
+                )
+
+    def test_local_storage_remains_filesystem_even_with_credentials_present(self):
+        result = self.run_settings_import(
+            overrides={
+                "SUPABASE_URL": "https://project.example.test",
+                "SUPABASE_SERVICE_ROLE_KEY": "test-only-storage-key",
+                "SUPABASE_STORAGE_BUCKET": "private",
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        configuration = json.loads(result.stdout)
+        self.assertEqual(configuration["storage_backend"], "local")
+        self.assertFalse(configuration["storage_enabled"])
+
+    def test_local_supabase_storage_requires_explicit_selection(self):
+        result = self.run_settings_import(
+            overrides={
+                "DJANGO_STORAGE": "supabase",
+                "SUPABASE_URL": "https://project.example.test",
+                "SUPABASE_SERVICE_ROLE_KEY": "test-only-storage-key",
+                "SUPABASE_STORAGE_BUCKET": "private",
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        configuration = json.loads(result.stdout)
+        self.assertEqual(configuration["storage_backend"], "supabase")
+        self.assertTrue(configuration["storage_enabled"])
+
+    def test_explicit_supabase_storage_requires_all_credentials(self):
+        result = self.run_settings_import(
+            overrides={
+                "DJANGO_STORAGE": "supabase",
+                "SUPABASE_URL": "",
+                "SUPABASE_SERVICE_ROLE_KEY": "",
+                "SUPABASE_STORAGE_BUCKET": "",
+            },
+        )
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(
-            "DATABASE_URL must be configured on Render.",
+            "SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, and "
+            "SUPABASE_STORAGE_BUCKET must be configured",
             result.stderr,
         )
 
-    def test_render_rejects_sqlite_database_url(self):
+    def test_production_requires_the_expected_supabase_storage_bucket(self):
         result = self.run_settings_import(
             render=True,
+            django_env="production",
+            database_url="postgresql://test:test@db.example.test:5432/test",
+            overrides={"SUPABASE_STORAGE_BUCKET": "private"},
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "SUPABASE_STORAGE_BUCKET must be ThreeShirt in production.",
+            result.stderr,
+        )
+
+    def test_local_configuration_ignores_database_url_and_uses_sqlite(self):
+        result = self.run_settings_import(
+            render=False,
+            database_url="postgresql://test:test@db.example.test:5432/test",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("django.db.backends.sqlite3", result.stdout)
+
+    def test_production_requires_database_url(self):
+        result = self.run_settings_import(
+            render=True,
+            django_env="production",
+            database_url="",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "DATABASE_URL must be configured when PostgreSQL is enabled.",
+            result.stderr,
+        )
+
+    def test_production_rejects_sqlite_backend(self):
+        result = self.run_settings_import(
+            django_env="production",
+            django_database="sqlite",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "Production requires DJANGO_DATABASE=postgresql.",
+            result.stderr,
+        )
+
+    def test_production_rejects_sqlite_database_url(self):
+        result = self.run_settings_import(
+            render=True,
+            django_env="production",
             database_url="sqlite:////tmp/three-shirt-test.sqlite3",
         )
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(
-            "DATABASE_URL must use PostgreSQL on Render.",
+            "DATABASE_URL must be a PostgreSQL URL",
             result.stderr,
         )
 
-    def test_render_postgresql_configuration_enforces_ssl_and_pool_safety(self):
+    def test_production_postgresql_configuration_enforces_ssl_and_pool_safety(self):
         result = self.run_settings_import(
             render=True,
+            django_env="production",
             database_url="postgresql://test:test@db.example.test:5432/test",
         )
 
@@ -396,8 +664,214 @@ class PostgreSQLDatabaseSettingsTests(SimpleTestCase):
         )
         self.assertEqual(configuration["options"]["sslmode"], "require")
         self.assertTrue(configuration["disable_server_side_cursors"])
-        self.assertEqual(configuration["conn_max_age"], 60)
+        self.assertEqual(configuration["conn_max_age"], 0)
+        self.assertTrue(configuration["storage_enabled"])
         self.assertTrue(configuration["health_checks"])
+
+    def test_postgresql_is_selected_only_when_explicitly_enabled(self):
+        result = self.run_settings_import(
+            django_database="postgresql",
+            database_url=(
+                "postgresql://test-user:test-password@"
+                "db.example.test:5432/testdb"
+            ),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        configuration = json.loads(result.stdout)
+        self.assertEqual(
+            configuration["engine"],
+            "django.db.backends.postgresql",
+        )
+        self.assertEqual(configuration["options"]["sslmode"], "require")
+        self.assertTrue(configuration["disable_server_side_cursors"])
+        self.assertEqual(configuration["conn_max_age"], 0)
+        self.assertTrue(configuration["health_checks"])
+
+    def test_production_selects_postgresql_without_render_flag(self):
+        result = self.run_settings_import(
+            django_env="production",
+            database_url=(
+                "postgresql://test-user:test-password@"
+                "db.example.test:5432/testdb"
+            ),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        configuration = json.loads(result.stdout)
+        self.assertEqual(configuration["environment"], "production")
+        self.assertEqual(
+            configuration["engine"],
+            "django.db.backends.postgresql",
+        )
+        self.assertFalse(configuration["debug"])
+        self.assertTrue(configuration["session_cookie_secure"])
+        self.assertTrue(configuration["csrf_cookie_secure"])
+        self.assertTrue(configuration["ssl_redirect"])
+        self.assertTrue(configuration["storage_enabled"])
+
+    def test_render_flag_does_not_select_production_or_storage(self):
+        result = self.run_settings_import(
+            render=True,
+            django_env="development",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        configuration = json.loads(result.stdout)
+        self.assertEqual(configuration["environment"], "development")
+        self.assertEqual(configuration["engine"], "django.db.backends.sqlite3")
+        self.assertFalse(configuration["storage_enabled"])
+
+    def test_production_without_database_url_fails_clearly(self):
+        result = self.run_settings_import(django_env="production")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "DATABASE_URL must be configured when PostgreSQL is enabled.",
+            result.stderr,
+        )
+
+    def test_production_without_storage_configuration_fails_clearly(self):
+        result = self.run_settings_import(
+            django_env="production",
+            database_url="postgresql://db.example.test:5432/testdb",
+            overrides={
+                "SUPABASE_URL": "",
+                "SUPABASE_SERVICE_ROLE_KEY": "",
+                "SUPABASE_STORAGE_BUCKET": "",
+            },
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, and "
+            "SUPABASE_STORAGE_BUCKET must be configured when "
+            "DJANGO_STORAGE=supabase.",
+            result.stderr,
+        )
+
+    def test_postgresql_without_database_url_fails_clearly(self):
+        result = self.run_settings_import(django_database="postgresql")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "DATABASE_URL must be configured when PostgreSQL is enabled.",
+            result.stderr,
+        )
+
+    def test_postgresql_connection_options_are_configurable(self):
+        result = self.run_settings_import(
+            django_database="postgresql",
+            database_url=(
+                "postgresql://test-user:test-password@"
+                "db.example.test:5432/testdb"
+            ),
+            overrides={
+                "DATABASE_SSLMODE": "verify-full",
+                "DATABASE_CONN_MAX_AGE": "15",
+                "DATABASE_DISABLE_SERVER_SIDE_CURSORS": "False",
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        configuration = json.loads(result.stdout)
+        self.assertEqual(configuration["options"]["sslmode"], "verify-full")
+        self.assertEqual(configuration["conn_max_age"], 15)
+        self.assertFalse(configuration["disable_server_side_cursors"])
+
+    def test_production_requires_strong_secret_key(self):
+        result = self.run_settings_import(
+            django_env="production",
+            overrides={"DJANGO_SECRET_KEY": ""},
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "A strong DJANGO_SECRET_KEY must be configured in production.",
+            result.stderr,
+        )
+
+    def test_production_rejects_debug_enabled(self):
+        result = self.run_settings_import(
+            django_env="production",
+            overrides={"DJANGO_DEBUG": "True"},
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "DJANGO_DEBUG must be false in production.",
+            result.stderr,
+        )
+
+    def test_production_requires_explicit_allowed_hosts(self):
+        result = self.run_settings_import(
+            django_env="production",
+            overrides={"ALLOWED_HOSTS": ""},
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "ALLOWED_HOSTS must contain explicit hosts in production.",
+            result.stderr,
+        )
+
+    def test_production_requires_explicit_cors_and_csrf_origins(self):
+        for setting in ("CORS_ALLOWED_ORIGINS", "CSRF_TRUSTED_ORIGINS"):
+            with self.subTest(setting=setting):
+                result = self.run_settings_import(
+                    django_env="production",
+                    overrides={setting: ""},
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    "CSRF_TRUSTED_ORIGINS and CORS_ALLOWED_ORIGINS "
+                    "must be configured in production.",
+                    result.stderr,
+                )
+
+    def test_production_rejects_non_https_origins(self):
+        result = self.run_settings_import(
+            django_env="production",
+            overrides={
+                "CORS_ALLOWED_ORIGINS": "http://frontend.example.test",
+                "CSRF_TRUSTED_ORIGINS": "http://frontend.example.test",
+            },
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "Production CORS and CSRF origins must use HTTPS.",
+            result.stderr,
+        )
+
+    def test_production_requires_secure_cookies_and_https_redirect(self):
+        for setting in (
+            "SESSION_COOKIE_SECURE",
+            "CSRF_COOKIE_SECURE",
+            "SECURE_SSL_REDIRECT",
+        ):
+            with self.subTest(setting=setting):
+                result = self.run_settings_import(
+                    django_env="production",
+                    overrides={setting: "False"},
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+
+    def test_development_settings_remain_local_and_non_secure(self):
+        result = self.run_settings_import()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        configuration = json.loads(result.stdout)
+        self.assertEqual(configuration["environment"], "development")
+        self.assertEqual(
+            configuration["engine"],
+            "django.db.backends.sqlite3",
+        )
+        self.assertTrue(configuration["debug"])
+        self.assertFalse(configuration["session_cookie_secure"])
+        self.assertFalse(configuration["csrf_cookie_secure"])
 
 
 class SQLiteToPostgreSQLTransferUnitTests(SimpleTestCase):
@@ -1276,7 +1750,7 @@ class VoteTests(TestCase):
                 )
 
 
-class VoteServiceTests(TestCase):
+class VoteServiceTests(TransactionTestCase):
     def setUp(self):
         self.student = User.objects.create_user(
             username="student_voter_service",

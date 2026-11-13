@@ -2,7 +2,7 @@ FROM python:3.14-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    RENDER=true
+    DJANGO_ENV=production
 
 WORKDIR /app
 
