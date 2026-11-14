@@ -1,0 +1,18 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+  <h1>Verificar conexão PostgreSQL</h1>
+  <p>A consulta só será executada ao clicar no botão.</p>
+  <form method="post">
+    {% csrf_token %}
+    <button type="submit">Executar consulta</button>
+  </form>
+
+  {% if result %}
+    <dl>
+      <dt>current_user</dt><dd>{{ result.current_user }}</dd>
+      <dt>rolsuper</dt><dd>{{ result.rolsuper }}</dd>
+      <dt>rolbypassrls</dt><dd>{{ result.rolbypassrls }}</dd>
+    </dl>
+  {% endif %}
+{% endblock %}
