@@ -15,6 +15,8 @@ class SupabaseStorageError(OSError):
 
 
 class PrivateProposalStorage(FileSystemStorage):
+    _MAX_ERROR_BODY_BYTES = 4096
+
     def __init__(self, location=None, base_url=None, prefix=""):
         self.prefix = self._normalize_prefix(prefix)
         super().__init__(location=location, base_url=base_url)
@@ -73,6 +75,7 @@ class PrivateProposalStorage(FileSystemStorage):
         data=None,
         content_type=None,
         allow_not_found=False,
+        allow_missing_object=False,
         extra_headers=None,
     ):
         key = settings.SUPABASE_SERVICE_ROLE_KEY
@@ -89,16 +92,46 @@ class PrivateProposalStorage(FileSystemStorage):
             with urlopen(request, timeout=30) as response:
                 return response.status, response.read()
         except HTTPError as exc:
-            exc.close()
+            status = exc.code
+            if allow_missing_object and status in {400, 404}:
+                try:
+                    error_content = exc.read(self._MAX_ERROR_BODY_BYTES + 1)
+                except OSError:
+                    error_content = None
+                finally:
+                    exc.close()
+                if (
+                    error_content is not None
+                    and len(error_content) <= self._MAX_ERROR_BODY_BYTES
+                    and self._is_missing_object_response(status, error_content)
+                ):
+                    return status, b""
+            else:
+                exc.close()
             if allow_not_found and exc.code == 404:
                 return exc.code, b""
             raise SupabaseStorageError(
-                f"Supabase Storage returned HTTP {exc.code}."
+                f"Supabase Storage returned HTTP {status}."
             ) from None
         except (URLError, TimeoutError, OSError):
             raise SupabaseStorageError(
                 "Unable to communicate with Supabase Storage."
             ) from None
+
+    @staticmethod
+    def _is_missing_object_response(status, content):
+        if not content:
+            return status == 404
+        try:
+            payload = json.loads(content)
+        except (TypeError, ValueError):
+            return False
+        if not isinstance(payload, dict):
+            return False
+        error_code = payload.get("code")
+        if error_code == "NoSuchKey":
+            return True
+        return status == 404 and error_code in (None, "")
 
     def _open(self, name, mode="rb"):
         if not self.uses_supabase:
@@ -153,11 +186,17 @@ class PrivateProposalStorage(FileSystemStorage):
         if not self.uses_supabase:
             return super().exists(name)
         status, _content = self._request(
-            "GET",
-            self._object_url(name, info=True),
-            allow_not_found=True,
+            "HEAD",
+            self._object_url(name),
+            allow_missing_object=True,
         )
-        return status != 404
+        if status in {400, 404}:
+            return False
+        if not 200 <= status < 300:
+            raise SupabaseStorageError(
+                f"Supabase Storage returned HTTP {status}."
+            )
+        return True
 
     def size(self, name):
         if not self.uses_supabase:

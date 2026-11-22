@@ -11,6 +11,7 @@ import sys
 import threading
 import tempfile
 from types import SimpleNamespace
+from urllib.error import HTTPError, URLError
 from unittest.mock import patch
 
 from django.contrib.admin.sites import AdminSite
@@ -79,7 +80,7 @@ from .services import (
     save_preference_response,
     submit_shirt_proposal,
 )
-from .storage import PrivateProposalStorage
+from .storage import PrivateProposalStorage, SupabaseStorageError
 from .views import (
     MaintenanceBackupError,
     _create_verified_database_backup,
@@ -183,7 +184,7 @@ class SupabaseStorageOperationsTests(SimpleTestCase):
 
         self.assertEqual(
             [call.args[0] for call in request.call_args_list],
-            ["GET", "POST", "GET", "GET", "DELETE"],
+            ["HEAD", "POST", "GET", "HEAD", "DELETE"],
         )
         self.assertEqual(
             request.call_args_list[1].kwargs["extra_headers"]["x-upsert"],
@@ -214,6 +215,181 @@ class SupabaseStorageOperationsTests(SimpleTestCase):
         self.assertEqual(directories, ["folder"])
         self.assertEqual(files, ["result.json"])
         self.assertEqual(request.call_args.args[0], "POST")
+
+
+@override_settings(
+    SUPABASE_STORAGE_ENABLED=True,
+    SUPABASE_URL="https://project.example.test",
+    SUPABASE_SERVICE_ROLE_KEY="storage-test-key",
+    SUPABASE_STORAGE_BUCKET="private",
+)
+class SupabaseStorageExistsTests(SimpleTestCase):
+    def setUp(self):
+        self.storage = PrivateProposalStorage()
+
+    def _http_error(self, status, body):
+        return HTTPError(
+            "https://project.example.test/storage/v1/object/private/test.png",
+            status,
+            "Storage error",
+            {},
+            BytesIO(body),
+        )
+
+    def test_existing_object_uses_head_and_returns_true(self):
+        with patch("election.storage.urlopen") as mocked_urlopen:
+            response = mocked_urlopen.return_value.__enter__.return_value
+            response.status = 200
+            response.read.return_value = b""
+
+            self.assertTrue(self.storage.exists("proposal.png"))
+
+        request = mocked_urlopen.call_args.args[0]
+        self.assertEqual(request.get_method(), "HEAD")
+        self.assertEqual(
+            request.full_url,
+            "https://project.example.test/storage/v1/object/private/proposal.png",
+        )
+
+    def test_documented_404_without_error_code_returns_false(self):
+        with patch(
+            "election.storage.urlopen",
+            side_effect=self._http_error(404, b""),
+        ):
+            self.assertFalse(self.storage.exists("proposal.png"))
+
+    def test_no_such_key_code_returns_false_even_with_http_400(self):
+        body = json.dumps({"code": "NoSuchKey", "message": "Object not found"}).encode()
+        with patch(
+            "election.storage.urlopen",
+            side_effect=self._http_error(400, body),
+        ):
+            self.assertFalse(self.storage.exists("proposal.png"))
+
+    def test_http_400_with_different_code_raises_sanitized_error(self):
+        sensitive_message = "private object path and service token"
+        body = json.dumps({
+            "code": "InvalidRequest",
+            "message": sensitive_message,
+        }).encode()
+        with patch(
+            "election.storage.urlopen",
+            side_effect=self._http_error(400, body),
+        ):
+            with self.assertRaises(SupabaseStorageError) as raised:
+                self.storage.exists("proposal.png")
+
+        self.assertNotIn(sensitive_message, str(raised.exception))
+        self.assertEqual(
+            str(raised.exception),
+            "Supabase Storage returned HTTP 400.",
+        )
+
+    def test_oversized_error_body_is_not_classified_as_absence(self):
+        body = (
+            json.dumps({"code": "NoSuchKey"}).encode()
+            + b" " * (self.storage._MAX_ERROR_BODY_BYTES + 1)
+        )
+        with patch(
+            "election.storage.urlopen",
+            side_effect=self._http_error(400, body),
+        ):
+            with self.assertRaises(SupabaseStorageError):
+                self.storage.exists("proposal.png")
+
+    def test_404_with_non_missing_error_code_raises(self):
+        body = json.dumps({"code": "NoSuchBucket"}).encode()
+        with patch(
+            "election.storage.urlopen",
+            side_effect=self._http_error(404, body),
+        ):
+            with self.assertRaises(SupabaseStorageError):
+                self.storage.exists("proposal.png")
+
+    def test_401_and_403_are_not_converted_to_absence(self):
+        for status in (401, 403):
+            with self.subTest(status=status), patch(
+                "election.storage.urlopen",
+                side_effect=self._http_error(status, b'{"code":"AccessDenied"}'),
+            ):
+                with self.assertRaises(SupabaseStorageError):
+                    self.storage.exists("proposal.png")
+
+    def test_network_error_is_wrapped_and_propagated(self):
+        with patch(
+            "election.storage.urlopen",
+            side_effect=URLError("connection unavailable"),
+        ):
+            with self.assertRaises(SupabaseStorageError) as raised:
+                self.storage.exists("proposal.png")
+
+        self.assertEqual(
+            str(raised.exception),
+            "Unable to communicate with Supabase Storage.",
+        )
+
+    def test_special_characters_are_encoded_in_object_path(self):
+        with patch("election.storage.urlopen") as mocked_urlopen:
+            response = mocked_urlopen.return_value.__enter__.return_value
+            response.status = 200
+            response.read.return_value = b""
+
+            self.assertTrue(
+                self.storage.exists("folder name/café #1?.png")
+            )
+
+        request = mocked_urlopen.call_args.args[0]
+        self.assertEqual(
+            request.full_url,
+            "https://project.example.test/storage/v1/object/private/"
+            "folder%20name/caf%C3%A9%20%231%3F.png",
+        )
+
+    def test_save_uses_alternate_name_when_original_exists(self):
+        with patch.object(
+            self.storage,
+            "_request",
+            side_effect=[
+                (200, b""),
+                (404, b""),
+                (200, b""),
+            ],
+        ) as request:
+            saved_name = self.storage.save(
+                "proposal.png",
+                ContentFile(b"test image", name="proposal.png"),
+            )
+
+        self.assertNotEqual(saved_name, "proposal.png")
+        self.assertEqual(
+            [call.args[0] for call in request.call_args_list],
+            ["HEAD", "HEAD", "POST"],
+        )
+        self.assertEqual(
+            request.call_args_list[-1].args[1],
+            self.storage._object_url(saved_name),
+        )
+        self.assertEqual(
+            request.call_args_list[-1].kwargs["extra_headers"]["x-upsert"],
+            "false",
+        )
+
+    def test_save_proceeds_when_object_is_absent(self):
+        with patch.object(
+            self.storage,
+            "_request",
+            side_effect=[(404, b""), (200, b"")],
+        ) as request:
+            saved_name = self.storage.save(
+                "new-proposal.png",
+                ContentFile(b"test image", name="new-proposal.png"),
+            )
+
+        self.assertEqual(saved_name, "new-proposal.png")
+        self.assertEqual(
+            [call.args[0] for call in request.call_args_list],
+            ["HEAD", "POST"],
+        )
 
 
 class PostgreSQLBackupTests(SimpleTestCase):
