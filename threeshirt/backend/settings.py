@@ -87,6 +87,41 @@ DEBUG = _env_bool("DJANGO_DEBUG", _debug_default)
 if _IS_PRODUCTION and DEBUG:
     raise ImproperlyConfigured("DJANGO_DEBUG must be false in production.")
 
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "application": {
+            "format": "%(asctime)s %(levelname)s %(name)s %(message)s",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "level": "ERROR",
+            "stream": "ext://sys.stderr",
+            "formatter": "application",
+        },
+    },
+    "loggers": {
+        "django.request": {
+            "handlers": ["console"],
+            "level": "ERROR",
+            "propagate": False,
+        },
+        "election": {
+            "handlers": ["console"],
+            "level": "ERROR",
+            "propagate": False,
+        },
+        "accounts": {
+            "handlers": ["console"],
+            "level": "ERROR",
+            "propagate": False,
+        },
+    },
+}
+
 SECRET_KEY = os.getenv(
     "DJANGO_SECRET_KEY",
     os.getenv("SECRET_KEY", ""),
