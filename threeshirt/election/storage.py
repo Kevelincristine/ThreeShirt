@@ -1,4 +1,6 @@
 import json
+import logging
+import re
 from io import BytesIO, TextIOWrapper
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -10,12 +12,31 @@ from django.core.files.base import File
 from django.core.files.storage import FileSystemStorage
 
 
+logger = logging.getLogger(__name__)
+
+
 class SupabaseStorageError(OSError):
     pass
 
 
 class PrivateProposalStorage(FileSystemStorage):
     _MAX_ERROR_BODY_BYTES = 4096
+    _MAX_LOG_VALUE_LENGTH = 512
+    _REDACTED = "[REDACTED]"
+    _BEARER_TOKEN_PATTERN = re.compile(
+        r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]+=*"
+    )
+    _SECRET_ASSIGNMENT_PATTERN = re.compile(
+        r"(?i)\b(authorization|api[_-]?key|access[_-]?token|"
+        r"refresh[_-]?token|service[_-]?role[_-]?key|token|secret|password)"
+        r"(\s*[:=]\s*)[^\s,;]+"
+    )
+    _JWT_PATTERN = re.compile(
+        r"\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"
+    )
+    _SUPABASE_KEY_PATTERN = re.compile(
+        r"\bsb_(?:secret|publishable)_[A-Za-z0-9_-]+\b"
+    )
 
     def __init__(self, location=None, base_url=None, prefix=""):
         self.prefix = self._normalize_prefix(prefix)
@@ -76,6 +97,7 @@ class PrivateProposalStorage(FileSystemStorage):
         content_type=None,
         allow_not_found=False,
         allow_missing_object=False,
+        operation="request",
         extra_headers=None,
     ):
         key = settings.SUPABASE_SERVICE_ROLE_KEY
@@ -93,23 +115,41 @@ class PrivateProposalStorage(FileSystemStorage):
                 return response.status, response.read()
         except HTTPError as exc:
             status = exc.code
-            if allow_missing_object and status in {400, 404}:
-                try:
-                    error_content = exc.read(self._MAX_ERROR_BODY_BYTES + 1)
-                except OSError:
-                    error_content = None
-                finally:
-                    exc.close()
-                if (
-                    error_content is not None
-                    and len(error_content) <= self._MAX_ERROR_BODY_BYTES
-                    and self._is_missing_object_response(status, error_content)
-                ):
-                    return status, b""
-            else:
+            try:
+                error_content = exc.read(self._MAX_ERROR_BODY_BYTES + 1)
+            except OSError:
+                error_content = None
+            finally:
                 exc.close()
-            if allow_not_found and exc.code == 404:
-                return exc.code, b""
+
+            missing_object = (
+                allow_missing_object
+                and status in {400, 404}
+                and error_content is not None
+                and len(error_content) <= self._MAX_ERROR_BODY_BYTES
+                and self._is_missing_object_response(status, error_content)
+            )
+            allowed_not_found = allow_not_found and status == 404
+            error_code, error_message = self._error_details(error_content)
+            log = (
+                logger.warning
+                if status == 400 or not (missing_object or allowed_not_found)
+                else logger.debug
+            )
+            log(
+                "Supabase Storage HTTP error: method=%s operation=%s "
+                "status=%s code=%s message=%s",
+                method,
+                operation,
+                status,
+                error_code or "-",
+                error_message or "-",
+            )
+
+            if missing_object:
+                return status, b""
+            if allowed_not_found:
+                return status, b""
             raise SupabaseStorageError(
                 f"Supabase Storage returned HTTP {status}."
             ) from None
@@ -118,20 +158,52 @@ class PrivateProposalStorage(FileSystemStorage):
                 "Unable to communicate with Supabase Storage."
             ) from None
 
+    @classmethod
+    def _error_details(cls, content):
+        if content is None or len(content) > cls._MAX_ERROR_BODY_BYTES:
+            return None, None
+        try:
+            payload = json.loads(content)
+        except (TypeError, ValueError):
+            return None, None
+        if not isinstance(payload, dict):
+            return None, None
+        return (
+            cls._sanitize_log_value(payload.get("code")),
+            cls._sanitize_log_value(payload.get("message")),
+        )
+
+    @classmethod
+    def _sanitize_log_value(cls, value):
+        if not isinstance(value, str):
+            return None
+        service_role_key = getattr(settings, "SUPABASE_SERVICE_ROLE_KEY", "")
+        if service_role_key:
+            value = value.replace(service_role_key, cls._REDACTED)
+        value = cls._BEARER_TOKEN_PATTERN.sub(
+            f"Bearer {cls._REDACTED}",
+            value,
+        )
+        value = cls._SECRET_ASSIGNMENT_PATTERN.sub(
+            rf"\1\2{cls._REDACTED}",
+            value,
+        )
+        value = cls._JWT_PATTERN.sub(cls._REDACTED, value)
+        value = cls._SUPABASE_KEY_PATTERN.sub(cls._REDACTED, value)
+        value = re.sub(r"[\r\n\t]+", " ", value)
+        return value[:cls._MAX_LOG_VALUE_LENGTH]
+
     @staticmethod
     def _is_missing_object_response(status, content):
         if not content:
-            return status == 404
+            return False
         try:
             payload = json.loads(content)
         except (TypeError, ValueError):
             return False
         if not isinstance(payload, dict):
             return False
-        error_code = payload.get("code")
-        if error_code == "NoSuchKey":
-            return True
-        return status == 404 and error_code in (None, "")
+        return status in {400, 404} and payload.get("code") == "NoSuchKey"
 
     def _open(self, name, mode="rb"):
         if not self.uses_supabase:
@@ -142,6 +214,7 @@ class PrivateProposalStorage(FileSystemStorage):
             "GET",
             self._object_url(name),
             allow_not_found=True,
+            operation="open",
         )
         if status == 404:
             raise FileNotFoundError(name)
@@ -163,6 +236,7 @@ class PrivateProposalStorage(FileSystemStorage):
             self._object_url(name),
             data=data,
             content_type=content_type or "application/octet-stream",
+            operation="upload",
             extra_headers={"x-upsert": "false"},
         )
         return name
@@ -180,15 +254,17 @@ class PrivateProposalStorage(FileSystemStorage):
             data=payload,
             content_type="application/json",
             allow_not_found=True,
+            operation="delete",
         )
 
     def exists(self, name):
         if not self.uses_supabase:
             return super().exists(name)
         status, _content = self._request(
-            "HEAD",
-            self._object_url(name),
+            "GET",
+            self._object_url(name, info=True),
             allow_missing_object=True,
+            operation="exists",
         )
         if status in {400, 404}:
             return False
@@ -204,6 +280,7 @@ class PrivateProposalStorage(FileSystemStorage):
         _status, content = self._request(
             "GET",
             self._object_url(name, info=True),
+            operation="size",
         )
         try:
             metadata = json.loads(content)
@@ -236,6 +313,7 @@ class PrivateProposalStorage(FileSystemStorage):
                 endpoint,
                 data=payload,
                 content_type="application/json",
+                operation="listdir",
             )
             try:
                 entries = json.loads(content)

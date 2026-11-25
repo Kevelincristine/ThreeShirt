@@ -184,7 +184,7 @@ class SupabaseStorageOperationsTests(SimpleTestCase):
 
         self.assertEqual(
             [call.args[0] for call in request.call_args_list],
-            ["HEAD", "POST", "GET", "HEAD", "DELETE"],
+            ["GET", "POST", "GET", "GET", "DELETE"],
         )
         self.assertEqual(
             request.call_args_list[1].kwargs["extra_headers"]["x-upsert"],
@@ -236,7 +236,7 @@ class SupabaseStorageExistsTests(SimpleTestCase):
             BytesIO(body),
         )
 
-    def test_existing_object_uses_head_and_returns_true(self):
+    def test_existing_object_uses_info_get_and_returns_true(self):
         with patch("election.storage.urlopen") as mocked_urlopen:
             response = mocked_urlopen.return_value.__enter__.return_value
             response.status = 200
@@ -245,34 +245,59 @@ class SupabaseStorageExistsTests(SimpleTestCase):
             self.assertTrue(self.storage.exists("proposal.png"))
 
         request = mocked_urlopen.call_args.args[0]
-        self.assertEqual(request.get_method(), "HEAD")
+        self.assertEqual(request.get_method(), "GET")
         self.assertEqual(
             request.full_url,
-            "https://project.example.test/storage/v1/object/private/proposal.png",
+            "https://project.example.test/storage/v1/object/info/private/proposal.png",
         )
 
-    def test_documented_404_without_error_code_returns_false(self):
-        with patch(
-            "election.storage.urlopen",
-            side_effect=self._http_error(404, b""),
-        ):
-            self.assertFalse(self.storage.exists("proposal.png"))
+    def test_404_without_missing_object_code_raises(self):
+        error_bodies = (
+            b"",
+            json.dumps({"message": "Object not found"}).encode(),
+        )
+        for body in error_bodies:
+            with self.subTest(body=body), patch(
+                "election.storage.urlopen",
+                side_effect=self._http_error(404, body),
+            ):
+                with self.assertRaises(SupabaseStorageError):
+                    self.storage.exists("proposal.png")
 
     def test_no_such_key_code_returns_false_even_with_http_400(self):
         body = json.dumps({"code": "NoSuchKey", "message": "Object not found"}).encode()
-        with patch(
+        with self.assertLogs("election.storage", level="WARNING") as logs, patch(
             "election.storage.urlopen",
             side_effect=self._http_error(400, body),
         ):
             self.assertFalse(self.storage.exists("proposal.png"))
 
+        log_output = "\n".join(logs.output)
+        self.assertIn("method=GET", log_output)
+        self.assertIn("operation=exists", log_output)
+        self.assertIn("status=400", log_output)
+        self.assertIn("code=NoSuchKey", log_output)
+        self.assertIn("message=Object not found", log_output)
+
+    def test_no_such_key_code_returns_false_even_with_http_404(self):
+        body = json.dumps({"code": "NoSuchKey", "message": "Object not found"}).encode()
+        with patch(
+            "election.storage.urlopen",
+            side_effect=self._http_error(404, body),
+        ):
+            self.assertFalse(self.storage.exists("proposal.png"))
+
     def test_http_400_with_different_code_raises_sanitized_error(self):
-        sensitive_message = "private object path and service token"
+        sensitive_message = (
+            "Bad request: Bearer storage-test-key, "
+            "apikey=storage-test-key, access_token=another-test-token, "
+            "sb_secret_test-supabase-key"
+        )
         body = json.dumps({
             "code": "InvalidRequest",
             "message": sensitive_message,
         }).encode()
-        with patch(
+        with self.assertLogs("election.storage", level="WARNING") as logs, patch(
             "election.storage.urlopen",
             side_effect=self._http_error(400, body),
         ):
@@ -284,6 +309,20 @@ class SupabaseStorageExistsTests(SimpleTestCase):
             str(raised.exception),
             "Supabase Storage returned HTTP 400.",
         )
+        log_output = "\n".join(logs.output)
+        self.assertIn("method=GET", log_output)
+        self.assertIn("operation=exists", log_output)
+        self.assertIn("status=400", log_output)
+        self.assertIn("code=InvalidRequest", log_output)
+        self.assertIn(
+            "message=Bad request: Bearer [REDACTED], apikey=[REDACTED], "
+            "access_token=[REDACTED], [REDACTED]",
+            log_output,
+        )
+        self.assertNotIn("storage-test-key", log_output)
+        self.assertNotIn("another-test-token", log_output)
+        self.assertNotIn("sb_secret_test-supabase-key", log_output)
+        self.assertNotIn(sensitive_message, log_output)
 
     def test_oversized_error_body_is_not_classified_as_absence(self):
         body = (
@@ -341,7 +380,7 @@ class SupabaseStorageExistsTests(SimpleTestCase):
         request = mocked_urlopen.call_args.args[0]
         self.assertEqual(
             request.full_url,
-            "https://project.example.test/storage/v1/object/private/"
+            "https://project.example.test/storage/v1/object/info/private/"
             "folder%20name/caf%C3%A9%20%231%3F.png",
         )
 
@@ -363,7 +402,7 @@ class SupabaseStorageExistsTests(SimpleTestCase):
         self.assertNotEqual(saved_name, "proposal.png")
         self.assertEqual(
             [call.args[0] for call in request.call_args_list],
-            ["HEAD", "HEAD", "POST"],
+            ["GET", "GET", "POST"],
         )
         self.assertEqual(
             request.call_args_list[-1].args[1],
@@ -388,7 +427,7 @@ class SupabaseStorageExistsTests(SimpleTestCase):
         self.assertEqual(saved_name, "new-proposal.png")
         self.assertEqual(
             [call.args[0] for call in request.call_args_list],
-            ["HEAD", "POST"],
+            ["GET", "POST"],
         )
 
 
