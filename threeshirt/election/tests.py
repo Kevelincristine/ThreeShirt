@@ -223,6 +223,90 @@ class SupabaseStorageOperationsTests(SimpleTestCase):
     SUPABASE_SERVICE_ROLE_KEY="storage-test-key",
     SUPABASE_STORAGE_BUCKET="private",
 )
+class SupabaseStorageSizeTests(SimpleTestCase):
+    def setUp(self):
+        self.storage = PrivateProposalStorage()
+
+    def test_size_reads_top_level_size_from_info_response(self):
+        content = json.dumps({"size": 1234, "metadata": None}).encode()
+        with patch.object(
+            self.storage,
+            "_request",
+            return_value=(200, content),
+        ) as request:
+            self.assertEqual(self.storage.size("proposal.png"), 1234)
+
+        request.assert_called_once_with(
+            "GET",
+            self.storage._object_url("proposal.png", info=True),
+            operation="size",
+        )
+
+    def test_size_ignores_custom_metadata_for_object_size(self):
+        content = json.dumps({
+            "size": 1234,
+            "metadata": {"size": 99, "label": "proposal"},
+        }).encode()
+        with patch.object(
+            self.storage,
+            "_request",
+            return_value=(200, content),
+        ):
+            self.assertEqual(self.storage.size("proposal.png"), 1234)
+
+    def test_size_rejects_invalid_info_responses(self):
+        invalid_responses = (
+            ("missing", {}),
+            ("null", {"size": None}),
+            ("negative", {"size": -1}),
+            ("text", {"size": "1234"}),
+            ("boolean", {"size": True}),
+            ("malformed JSON", b'{"size":'),
+        )
+        for label, payload in invalid_responses:
+            content = (
+                payload
+                if isinstance(payload, bytes)
+                else json.dumps(payload).encode()
+            )
+            with self.subTest(response=label), patch.object(
+                self.storage,
+                "_request",
+                return_value=(200, content),
+            ):
+                with self.assertRaisesRegex(
+                    SupabaseStorageError,
+                    "Supabase Storage returned invalid object metadata.",
+                ):
+                    self.storage.size("proposal.png")
+
+    def test_size_propagates_http_errors(self):
+        for status in (400, 401, 403, 404, 500):
+            error = HTTPError(
+                "https://project.example.test/storage/v1/object/info/"
+                "private/proposal.png",
+                status,
+                "Storage error",
+                {},
+                BytesIO(b'{"code":"NoSuchKey"}'),
+            )
+            with self.subTest(status=status), patch(
+                "election.storage.urlopen",
+                side_effect=error,
+            ):
+                with self.assertRaisesRegex(
+                    SupabaseStorageError,
+                    f"Supabase Storage returned HTTP {status}.",
+                ):
+                    self.storage.size("proposal.png")
+
+
+@override_settings(
+    SUPABASE_STORAGE_ENABLED=True,
+    SUPABASE_URL="https://project.example.test",
+    SUPABASE_SERVICE_ROLE_KEY="storage-test-key",
+    SUPABASE_STORAGE_BUCKET="private",
+)
 class SupabaseStorageExistsTests(SimpleTestCase):
     def setUp(self):
         self.storage = PrivateProposalStorage()

@@ -283,12 +283,22 @@ class PrivateProposalStorage(FileSystemStorage):
             operation="size",
         )
         try:
-            metadata = json.loads(content)
-            return int(metadata["metadata"]["size"])
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            response_metadata = json.loads(content)
+        except (TypeError, ValueError):
             raise SupabaseStorageError(
                 "Supabase Storage returned invalid object metadata."
             ) from None
+
+        size = (
+            response_metadata.get("size")
+            if isinstance(response_metadata, dict)
+            else None
+        )
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            raise SupabaseStorageError(
+                "Supabase Storage returned invalid object metadata."
+            ) from None
+        return size
 
     def listdir(self, path):
         if not self.uses_supabase:
